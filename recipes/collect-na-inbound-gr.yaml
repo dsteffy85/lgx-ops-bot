@@ -1,0 +1,98 @@
+version: "1.0"
+title: "LGX Ops Bot - Collect NA Inbound GR"
+description: >
+  Queries Snowflake SQ_841_INBOUND_V for CVU/IMC/IMU facilities
+  and stores results in the local SQLite database.
+  Also pushes the 7-day aggregated view to Google Sheets (NA Data tab).
+
+instructions: |
+  You are the LGX Ops Bot data collector. Follow these steps exactly.
+
+  ## Step 1 — Enable extensions
+  Ensure `snowflake` and `googledrive` extensions are enabled.
+
+  ## Step 2 — Run the Snowflake query (30-day lookback)
+  Execute this query:
+
+  ```sql
+  SELECT
+      TO_CHAR(TO_DATE(ADJUSTMENT_DATE), 'YYYY-MM-DD') AS ADJUSTMENT_DATE,
+      FACILILTY_ID AS FACILITY_ID,
+      ITEM_CODE,
+      ITEM_DESCRIPTION,
+      PRODUCT_NAME,
+      CLIENT_CODE,
+      ADJUSTMENT_ID,
+      COALESCE(AVL_QUANTITY, 0) AS AVL_QUANTITY,
+      COALESCE(UNAVL_QUANTITY, 0) AS UNAVL_QUANTITY,
+      COALESCE(RETURN_QUANTITY, 0) AS RETURN_QUANTITY,
+      COALESCE(STD_COST, 0) AS STD_COST,
+      COALESCE(EXTENDED_COST, 0) AS EXTENDED_COST,
+      FILE_NAME,
+      PROCESS_FLAG
+  FROM ORACLE_ERP.SCM.SQ_841_INBOUND_V
+  WHERE TENANT IN ('SQ','SQ1')
+    AND FACILILTY_ID IN ('CVU', 'IMC', 'IMU')
+    AND REMARKS = 'STAT'
+    AND ADJUSTMENT_DATE >= DATEADD('day', -30, CURRENT_DATE())
+  ORDER BY ADJUSTMENT_DATE DESC, FACILILTY_ID, ITEM_CODE
+  ```
+
+  If the query fails or times out, retry once. If it still fails, log the error and stop.
+
+  ## Step 3 — Save results to CSV
+  Write the query results to a CSV file at:
+  `./data/na_inbound_gr_export.csv`
+
+  The CSV must have a header row with these exact column names:
+  ADJUSTMENT_DATE, FACILITY_ID, ITEM_CODE, ITEM_DESCRIPTION, PRODUCT_NAME,
+  CLIENT_CODE, ADJUSTMENT_ID, AVL_QUANTITY, UNAVL_QUANTITY, RETURN_QUANTITY,
+  STD_COST, EXTENDED_COST, FILE_NAME, PROCESS_FLAG
+
+  ## Step 4 — Import into SQLite
+  Run:
+  ```bash
+  cd $PROJECT_DIR  # Set PROJECT_DIR to your lgx-ops-bot path
+  python3 scripts/collect_na_inbound_gr.py --from-csv data/na_inbound_gr_export.csv
+  ```
+
+  This upserts data into the local SQLite database (handles duplicates automatically).
+
+  ## Step 5 — Push 7-day aggregated view to Google Sheets
+  Now run the SAME aggregated query that the NA INBOUND GR DAILY job uses:
+
+  ```sql
+  SELECT
+      TO_CHAR(TO_DATE(v.ADJUSTMENT_DATE), 'YYYY-MM-DD') AS ADJUSTMENT_DATE,
+      v.FACILILTY_ID AS FACILITY_ID,
+      v.ITEM_CODE,
+      v.ITEM_DESCRIPTION,
+      v.PRODUCT_NAME,
+      COALESCE(SUM(v.AVL_QUANTITY), 0) AS AVL_QUANTITY,
+      COALESCE(SUM(v.UNAVL_QUANTITY), 0) AS UNAVL_QUANTITY
+  FROM (
+      SELECT * FROM ORACLE_ERP.SCM.SQ_841_INBOUND_V
+      WHERE TENANT IN ('SQ','SQ1')
+  ) AS v
+  WHERE v.FACILILTY_ID IN ('CVU', 'IMC', 'IMU')
+    AND v.REMARKS = 'STAT'
+    AND v.ADJUSTMENT_DATE >= DATEADD('day', -6, CURRENT_DATE())
+    AND v.ADJUSTMENT_DATE < DATEADD('day', 7, DATEADD('day', -6, CURRENT_DATE()))
+  GROUP BY TO_DATE(v.ADJUSTMENT_DATE), v.FACILILTY_ID, v.ITEM_CODE, v.ITEM_DESCRIPTION, v.PRODUCT_NAME
+  ORDER BY 1, 2, 3, 4, 5
+  ```
+
+  Then clear and write to Google Sheets:
+  - Clear: googledrive__sheets_tool operation="clear_values" spreadsheet="YOUR_SPREADSHEET_ID" sheet_name="NA Data"
+  - Write header + data: googledrive__sheets_tool operation="update_values" sheet_range="A1"
+    Header: ["Adjustment Date", "Facility ID", "Item Code", "Item Description", "Product Name", "AVL Quantity", "UNAVL Quantity"]
+  - Timestamp: googledrive__sheets_tool operation="update_values" sheet_range="I1:I2" values=[["Last Updated"], ["=NOW()"]]
+
+  ## Step 6 — Print summary
+  Run:
+  ```bash
+  cd $PROJECT_DIR  # Set PROJECT_DIR to your lgx-ops-bot path
+  python3 scripts/collect_na_inbound_gr.py --summary --summary-days 7
+  ```
+
+  Report: rows collected, date range, facilities, and confirm Google Sheets updated.
