@@ -1,0 +1,64 @@
+name: Collect NA Inbound GR
+
+on:
+  # Run daily at 4:00 AM PST (12:00 UTC)
+  schedule:
+    - cron: '0 12 * * *'
+
+  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: 'Number of days to look back'
+        required: false
+        default: '30'
+
+jobs:
+  collect-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Test Snowflake connection
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: python3 scripts/snowflake_query.py --test
+
+      - name: Run NA Inbound GR query
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          LOOKBACK=${{ github.event.inputs.lookback_days || '30' }}
+          python3 scripts/snowflake_query.py \
+            --query queries/na_inbound_gr.sql \
+            --output data/na_inbound_gr_export.csv \
+            --lookback-days $LOOKBACK
+
+      - name: Import into SQLite
+        run: python3 scripts/collect_na_inbound_gr.py --from-csv data/na_inbound_gr_export.csv
+
+      - name: Print summary
+        run: python3 scripts/collect_na_inbound_gr.py --summary --summary-days 7
+
+      # TODO: Add Google Sheets push step once service account is configured
+      # - name: Push to Google Sheets
+      #   env:
+      #     GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+      #   run: python3 scripts/push_to_sheets.py
