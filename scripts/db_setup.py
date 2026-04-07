@@ -7,12 +7,13 @@ Creates and maintains the SQLite database for all collected data.
 import sqlite3
 import os
 from datetime import datetime
+from typing import Optional
 
 DB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
 DB_PATH = os.path.join(DB_DIR, 'lgx_ops.db')
 
 
-def get_connection():
+def get_connection() -> sqlite3.Connection:
     """Get a connection to the SQLite database."""
     os.makedirs(DB_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -22,8 +23,8 @@ def get_connection():
     return conn
 
 
-def setup_database():
-    """Create all tables and indexes."""
+def setup_database() -> str:
+    """Create all tables and indexes. Returns the path to the database file."""
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -113,7 +114,7 @@ def setup_database():
     return DB_PATH
 
 
-def get_stats():
+def get_stats() -> None:
     """Print database statistics."""
     conn = get_connection()
     cursor = conn.cursor()

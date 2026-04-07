@@ -21,12 +21,13 @@ import csv
 import argparse
 import base64
 from datetime import datetime
+from typing import Optional
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 import snowflake.connector
 
 
-def get_connection():
+def get_connection() -> snowflake.connector.SnowflakeConnection:
     """Create Snowflake connection using RSA key pair auth."""
     account = os.environ.get('SNOWFLAKE_ACCOUNT', 'square')
     user = os.environ.get('SNOWFLAKE_USER', 'LGX_OPS_BOT')
@@ -38,12 +39,21 @@ def get_connection():
         sys.exit(1)
 
     # Decode the base64-encoded private key
-    private_key_pem = base64.b64decode(private_key_b64)
-    private_key = serialization.load_pem_private_key(
-        private_key_pem,
-        password=None,
-        backend=default_backend()
-    )
+    try:
+        private_key_pem = base64.b64decode(private_key_b64)
+    except Exception as e:
+        print(f"ERROR: Failed to base64-decode SNOWFLAKE_PRIVATE_KEY: {e}")
+        sys.exit(1)
+
+    try:
+        private_key = serialization.load_pem_private_key(
+            private_key_pem,
+            password=None,
+            backend=default_backend()
+        )
+    except Exception as e:
+        print(f"ERROR: Failed to load private key: {e}")
+        sys.exit(1)
 
     # Get the raw bytes for Snowflake connector
     private_key_bytes = private_key.private_bytes(
@@ -63,8 +73,16 @@ def get_connection():
     return conn
 
 
-def run_query(conn, sql, output_path=None):
-    """Execute a query and optionally save results to CSV."""
+def run_query(
+    conn: snowflake.connector.SnowflakeConnection,
+    sql: str,
+    output_path: Optional[str] = None,
+) -> tuple[list[str], list[tuple]]:
+    """Execute a query and optionally save results to CSV.
+
+    Returns:
+        A tuple of (columns, rows).
+    """
     print(f"Executing query ({len(sql)} chars)...")
     start = datetime.now()
 
@@ -89,7 +107,8 @@ def run_query(conn, sql, output_path=None):
     return columns, rows
 
 
-def main():
+def main() -> None:
+    """Parse CLI arguments, run the requested Snowflake query, and write output."""
     parser = argparse.ArgumentParser(description='LGX Ops Bot - Snowflake Query Runner')
     parser.add_argument('--query', type=str, help='Path to SQL file')
     parser.add_argument('--sql', type=str, help='Inline SQL query')

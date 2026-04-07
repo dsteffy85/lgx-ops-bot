@@ -9,7 +9,8 @@ import sys, json, csv, os
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CSV_OUT = os.path.join(PROJ, "data", "snowflake_30day.csv")
 
-def main():
+def main() -> None:
+    """Parse a Snowflake JSON result (file or stdin), write to CSV, then import into SQLite."""
     # Read JSON from file or stdin
     if len(sys.argv) > 1 and sys.argv[1] == "--stdin":
         raw = sys.stdin.read()
@@ -21,8 +22,12 @@ def main():
         print("   or: cat result.json | python3 seed_from_snowflake.py --stdin")
         sys.exit(1)
 
-    payload = json.loads(raw)
-    
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"ERROR: Failed to parse JSON input: {e}")
+        sys.exit(1)
+
     # Handle both {"data": [...]} and plain [...]
     if isinstance(payload, dict):
         rows = payload.get("data", payload.get("rows", []))

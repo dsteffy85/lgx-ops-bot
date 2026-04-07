@@ -20,6 +20,7 @@ import os
 import sys
 import argparse
 from datetime import datetime, timedelta
+from typing import Optional
 
 # Paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -33,7 +34,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
 
 
-def log(msg):
+def log(msg: str) -> None:
     """Log to both stdout and log file."""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     line = f"[{timestamp}] {msg}"
@@ -43,7 +44,7 @@ def log(msg):
         f.write(line + '\n')
 
 
-def get_db():
+def get_db() -> sqlite3.Connection:
     """Get database connection, create tables if needed."""
     # Auto-setup if DB doesn't exist
     if not os.path.exists(DB_PATH):
@@ -59,8 +60,8 @@ def get_db():
     return conn
 
 
-def start_run(conn):
-    """Record the start of a collection run."""
+def start_run(conn: sqlite3.Connection) -> int:
+    """Record the start of a collection run. Returns the new run_id."""
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO run_log (source_id, started_at, status)
@@ -70,7 +71,15 @@ def start_run(conn):
     return cursor.lastrowid
 
 
-def finish_run(conn, run_id, status, rows_fetched=0, rows_inserted=0, rows_updated=0, error_message=None):
+def finish_run(
+    conn: sqlite3.Connection,
+    run_id: int,
+    status: str,
+    rows_fetched: int = 0,
+    rows_inserted: int = 0,
+    rows_updated: int = 0,
+    error_message: Optional[str] = None,
+) -> None:
     """Record the completion of a collection run."""
     cursor = conn.cursor()
     cursor.execute("""
@@ -99,7 +108,7 @@ def finish_run(conn, run_id, status, rows_fetched=0, rows_inserted=0, rows_updat
     conn.commit()
 
 
-def import_from_csv(csv_path):
+def import_from_csv(csv_path: str) -> bool:
     """Import NA Inbound GR data from a CSV file into SQLite."""
     log(f"📥 Importing from CSV: {csv_path}")
 
@@ -194,7 +203,7 @@ def import_from_csv(csv_path):
         return False
 
 
-def import_from_json(json_path):
+def import_from_json(json_path: str) -> bool:
     """Import NA Inbound GR data from a JSON file (Snowflake query result format)."""
     log(f"📥 Importing from JSON: {json_path}")
 
@@ -202,8 +211,12 @@ def import_from_json(json_path):
         log(f"❌ JSON file not found: {json_path}")
         return False
 
-    with open(json_path, 'r') as f:
-        data = json.load(f)
+    try:
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        log(f"❌ Failed to parse JSON file: {e}")
+        return False
 
     # Handle Snowflake result format: {"data": [...], "columns": [...]}
     if isinstance(data, dict) and 'data' in data:
@@ -230,7 +243,7 @@ def import_from_json(json_path):
     return False
 
 
-def get_latest_date(conn):
+def get_latest_date(conn: sqlite3.Connection) -> Optional[str]:
     """Get the most recent adjustment_date in the database."""
     cursor = conn.cursor()
     cursor.execute("SELECT MAX(adjustment_date) as latest FROM na_inbound_gr")
@@ -238,7 +251,7 @@ def get_latest_date(conn):
     return row['latest'] if row and row['latest'] else None
 
 
-def query_summary(days=7):
+def query_summary(days: int = 7) -> None:
     """Print a summary of recent data for quick checks."""
     conn = get_db()
     cursor = conn.cursor()

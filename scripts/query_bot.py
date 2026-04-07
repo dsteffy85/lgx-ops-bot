@@ -19,13 +19,15 @@ import sys
 import json
 import argparse
 from datetime import datetime, timedelta
+from typing import Any, Optional
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 DB_PATH = os.path.join(PROJECT_DIR, 'data', 'lgx_ops.db')
 
 
-def get_db():
+def get_db() -> sqlite3.Connection:
+    """Get a read-only connection to the SQLite database."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
@@ -171,7 +173,7 @@ QUERIES = {
 }
 
 
-def run_query(query_name, params=None):
+def run_query(query_name: str, params: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Run a named query and return results as list of dicts."""
     if query_name not in QUERIES:
         return {"error": f"Unknown query: {query_name}. Available: {list(QUERIES.keys())}"}
@@ -211,7 +213,7 @@ def run_query(query_name, params=None):
         return {"error": str(e), "query": query_name}
 
 
-def format_result(result):
+def format_result(result: dict[str, Any]) -> str:
     """Format query result for human-readable output."""
     if 'error' in result:
         return f"❌ Error: {result['error']}"
@@ -243,7 +245,7 @@ def format_result(result):
     return '\n'.join(lines)
 
 
-def list_queries():
+def list_queries() -> None:
     """List all available queries."""
     print("\n📋 Available Queries")
     print("=" * 60)
