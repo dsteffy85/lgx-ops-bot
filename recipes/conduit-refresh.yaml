@@ -1,0 +1,21 @@
+version: "1.0"
+title: "Conduit Daily Refresh"
+description: "Refreshes all Conduit pipelines"
+
+extensions:
+  - name: developer
+    type: builtin
+
+provider: anthropic
+model: claude-sonnet-4-20250514
+max_turns: 5
+
+steps:
+  - action: Run Conduit pipeline refresh
+    content: |
+      Run the Conduit refresh script. Execute this exact command:
+      
+      cd ~/Desktop/Automation/lgx-ops-bot && python3 conduit/refresh_all.py
+      
+      If any pipeline fails, report the error but continue with the others.
+      Print the final summary showing rows loaded per pipeline.
