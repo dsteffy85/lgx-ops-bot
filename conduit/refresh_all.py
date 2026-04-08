@@ -158,16 +158,27 @@ def sync_po_lines(cursor):
 
 @pipeline('inventory')
 def sync_inventory(cursor):
-    """Inventory EOD → LGX_OPS_BOT.WIGEON.INVENTORY_EOD"""
+    """Inventory EOD (current) → LGX_OPS_BOT.WIGEON.INVENTORY_EOD
+    
+    Uses SQ_EOD_ONHAND_INBOUND (8.5M rows, updated daily) joined with
+    Arena PLM for product family enrichment. Replaces old SQ_CM_EOD_ONHAND
+    which was stale (last data April 2023).
+    """
     cursor.execute("""
     CREATE OR REPLACE TABLE LGX_OPS_BOT.WIGEON.INVENTORY_EOD AS
     SELECT
-        ID, SNAPSHOT_DATE, FACILITY, SKU, DESCRIPTION, UPC,
-        PRIMARY_SUPPLIER, AVLBL_QTY, ONORDER_QTY, RESERVED_QTY,
-        TOTAL_ONHAND, MRB, CREATED_AT, UPDATED_AT,
+        e.ID, e.SNAPSHOT_DATE, e.FACILITY, e.ITEM_CODE,
+        e.SUB_INVENTORY, e.ONHAND_QUANTITY, e.COMMITED_QUANTITY,
+        e.UOM, e.LOCATION, e.CLIENT_CODE, e.DAYS_INVENTORY,
+        e.TENANT, e.CREATED_AT, e.UPDATED_AT,
+        a.PRODUCT_FAMILY, a.ITEM_NAME as PRODUCT_NAME,
+        a.LIFECYCLE_PHASE, a.PRODUCT_CATEGORY,
         CURRENT_TIMESTAMP() as _CONDUIT_SYNCED_AT
-    FROM ORACLE_ERP.SCM.SQ_CM_EOD_ONHAND
-    ORDER BY SNAPSHOT_DATE DESC, FACILITY, SKU
+    FROM ORACLE_ERP.SCM.SQ_EOD_ONHAND_INBOUND e
+    LEFT JOIN LGX_OPS_BOT.PRODUCTS.ARENA_ITEMS a 
+        ON e.ITEM_CODE = a.ITEM_NUMBER
+    WHERE e.SNAPSHOT_DATE >= DATEADD('day', -90, CURRENT_DATE())
+    ORDER BY e.SNAPSHOT_DATE DESC, e.FACILITY, e.ITEM_CODE
     """)
     cursor.execute("SELECT COUNT(*) FROM LGX_OPS_BOT.WIGEON.INVENTORY_EOD")
     return cursor.fetchone()[0]
