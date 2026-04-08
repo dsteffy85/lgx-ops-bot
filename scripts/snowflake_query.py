@@ -30,7 +30,7 @@ import snowflake.connector
 def get_connection() -> snowflake.connector.SnowflakeConnection:
     """Create Snowflake connection using RSA key pair auth."""
     account = os.environ.get('SNOWFLAKE_ACCOUNT', 'square')
-    user = os.environ.get('SNOWFLAKE_USER', 'LGX_OPS_BOT')
+    user = os.environ.get('SNOWFLAKE_USER', 'LGX_OPS_BOT@squareup.com')
     warehouse = os.environ.get('SNOWFLAKE_WAREHOUSE', 'ETL__MEDIUM')
     private_key_b64 = os.environ.get('SNOWFLAKE_PRIVATE_KEY', '')
 
