@@ -1,0 +1,48 @@
+name: Conduit Daily Refresh
+
+on:
+  # Run daily at 6:00 AM PST (14:00 UTC)
+  schedule:
+    - cron: '0 14 * * *'
+
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      pipelines:
+        description: 'Pipelines to run (comma-separated, or "all")'
+        required: false
+        default: 'all'
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install snowflake-connector-python cryptography
+
+      - name: Run Conduit pipelines
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          PIPELINES="${{ github.event.inputs.pipelines || 'all' }}"
+          if [ "$PIPELINES" = "all" ]; then
+            python3 conduit/refresh_all.py
+          else
+            # Split comma-separated pipelines into args
+            IFS=',' read -ra TARGETS <<< "$PIPELINES"
+            python3 conduit/refresh_all.py "${TARGETS[@]}"
+          fi

@@ -29,25 +29,50 @@ from cryptography.hazmat.backends import default_backend
 # CONNECTION
 # ============================================================================
 def get_connection(role='LGX_OPS_BOT__SNOWFLAKE__ADMIN'):
-    """Connect to Snowflake using LGX_OPS_BOT key pair auth"""
-    key_files = glob.glob(str(Path.home() / 'Desktop' / 'LGX_OPS_BOT_private_keys_*.json'))
-    if not key_files:
-        raise FileNotFoundError("No LGX_OPS_BOT private key file found on Desktop")
+    """Connect to Snowflake using LGX_OPS_BOT key pair auth.
     
-    with open(key_files[0]) as f:
-        data = json.load(f)
+    Supports two modes:
+    1. Local: Reads from ~/Desktop/LGX_OPS_BOT_private_keys_*.json
+    2. CI/GitHub Actions: Reads from SNOWFLAKE_PRIVATE_KEY env var (base64 encoded)
+    """
+    import os
+    import base64
     
-    p_key = serialization.load_pem_private_key(
-        data['square']['private_key'].encode('utf-8'),
-        password=None,
-        backend=default_backend()
-    )
+    # Try environment variables first (GitHub Actions)
+    env_key = os.environ.get('SNOWFLAKE_PRIVATE_KEY')
+    if env_key:
+        key_bytes = base64.b64decode(env_key)
+        p_key = serialization.load_pem_private_key(
+            key_bytes,
+            password=None,
+            backend=default_backend()
+        )
+        account = os.environ.get('SNOWFLAKE_ACCOUNT', 'square')
+        user = os.environ.get('SNOWFLAKE_USER', 'LGX_OPS_BOT@squareup.com')
+        warehouse = os.environ.get('SNOWFLAKE_WAREHOUSE', 'ETL__MEDIUM')
+    else:
+        # Local mode: read from JSON file on Desktop
+        key_files = glob.glob(str(Path.home() / 'Desktop' / 'LGX_OPS_BOT_private_keys_*.json'))
+        if not key_files:
+            raise FileNotFoundError("No LGX_OPS_BOT private key file found on Desktop and no SNOWFLAKE_PRIVATE_KEY env var set")
+        
+        with open(key_files[0]) as f:
+            data = json.load(f)
+        
+        p_key = serialization.load_pem_private_key(
+            data['square']['private_key'].encode('utf-8'),
+            password=None,
+            backend=default_backend()
+        )
+        account = data['square'].get('account', 'square')
+        user = data['square'].get('robot_user', 'LGX_OPS_BOT') + '@squareup.com'
+        warehouse = 'ETL__MEDIUM'
     
     return snowflake.connector.connect(
-        account='square',
-        user='LGX_OPS_BOT@squareup.com',
+        account=account,
+        user=user,
         private_key=p_key,
-        warehouse='ETL__MEDIUM',
+        warehouse=warehouse,
         role=role
     )
 

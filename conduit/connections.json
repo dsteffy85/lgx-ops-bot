@@ -1,0 +1,47 @@
+{
+  "arena_plm": {
+    "connector_type": "arena_plm",
+    "enabled": true,
+    "sync_mode": "full",
+    "schedule": "0 6 * * *",
+    "dest_table": "LGX_OPS_BOT.PRODUCTS.ARENA_ITEMS",
+    "source": "ORACLE_ERP.SCM.SQ_ARENA_PLM_RAW + APP_HARDWARE.MART_LOGISTICS.SNAP_SQ_SKU_ARENA_ITEMS",
+    "row_count": 5837
+  },
+  "oracle_po": {
+    "connector_type": "oracle_po",
+    "enabled": true,
+    "sync_mode": "full",
+    "schedule": "0 9 * * *",
+    "dest_table": "LGX_OPS_BOT.COST.PO_LINES",
+    "source": "ORACLE_ERP.SCM.CLOUD_PO_DETAILS",
+    "row_count": 6610
+  },
+  "inventory_eod": {
+    "connector_type": "inventory_eod",
+    "enabled": true,
+    "sync_mode": "full",
+    "schedule": "0 8 * * *",
+    "dest_table": "LGX_OPS_BOT.WIGEON.INVENTORY_EOD",
+    "source": "ORACLE_ERP.SCM.SQ_CM_EOD_ONHAND",
+    "row_count": 101945
+  },
+  "na_inbound_gr": {
+    "connector_type": "na_inbound",
+    "enabled": true,
+    "sync_mode": "full",
+    "schedule": "0 4 * * *",
+    "dest_table": "LGX_OPS_BOT.WIGEON.NA_INBOUND_GR",
+    "source": "ORACLE_ERP.SCM.SQ_841_INBOUND_V",
+    "row_count": 14136
+  },
+  "delivery_performance": {
+    "connector_type": "delivery",
+    "enabled": true,
+    "sync_mode": "full",
+    "schedule": "0 7 * * *",
+    "dest_table": "LGX_OPS_BOT.WIGEON.DELIVERY_PERFORMANCE",
+    "source": "APP_HARDWARE.MART_LOGISTICS.RPT_SQ_DELIVERY_PERFORMANCE",
+    "row_count": 3664656
+  }
+}

@@ -1,0 +1,45 @@
+version: "1.0"
+last_updated: "2026-04-08"
+database: LGX_OPS_BOT
+
+domains:
+  products:
+    description: "Product master data from Arena PLM"
+    table: LGX_OPS_BOT.PRODUCTS.ARENA_ITEMS
+    row_count: 5837
+  purchasing:
+    description: "Purchase orders from Oracle ERP"
+    table: LGX_OPS_BOT.COST.PO_LINES
+    row_count: 6610
+  inventory:
+    description: "End-of-day inventory positions"
+    table: LGX_OPS_BOT.WIGEON.INVENTORY_EOD
+    row_count: 101945
+  na_inbound:
+    description: "NA Inbound Goods Receipt (CVU, IMC, IMU)"
+    table: LGX_OPS_BOT.WIGEON.NA_INBOUND_GR
+    row_count: 14136
+  delivery:
+    description: "Delivery performance metrics"
+    table: LGX_OPS_BOT.WIGEON.DELIVERY_PERFORMANCE
+    row_count: 3664656
+
+aliases:
+  products:
+    Terminal: [T2, T2C, T2B]
+    "Reader X": [X2, X2C, X2B]
+    Stand: [S3, S3B, S3H]
+    Bitkey: [B4]
+    Register: [R4X, R4]
+    Kiosk: [KSK, Kiosk]
+  locations:
+    "CEVA US": [CVU]
+    "CEVA Canada": [IMC]
+    "CEVA UK": [IMU, GBR]
+    Foxconn: [FOX_CN, FOX_VN]
+    Arvato: [ARV]
+  inventory_types:
+    available: [AVAILABLE, ON_HAND]
+    reverse: [REVERSE, RMA, RTV]
+    quarantine: [QUARANTINE, QA, HOLD]
+    in_transit: [IN_TRANSIT, SHIPPING]
