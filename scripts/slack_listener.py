@@ -786,17 +786,30 @@ def _is_process_question(question: str) -> bool:
     Data questions ask about numbers, counts, orders, inventory levels, etc.
     """
     q = question.lower()
-    process_signals = [
+
+    # Check data signals FIRST — they're more specific and should take priority
+    data_signals = [
+        'how many', 'how much', 'count', 'total',
+        'shipped', 'delivered', 'inventory', 'on hand', 'onhand',
+        'units', 'quantity', 'volume',
+        'last week', 'this week', 'yesterday', 'today',
+        'us-', 'order number', 'tracking',
+        'a-sku-', 'sku', 'facility', 'warehouse',
+    ]
+    if any(signal in q for signal in data_signals):
+        return False
+
+    # Process phrase signals (multi-word, safe for substring matching)
+    process_phrases = [
         'how do i', 'how to', 'what is the process', "what's the process",
         'who handles', 'who do i', 'who should i', 'who is responsible',
         'where do i', 'where should i', 'where can i',
-        'can i ship', 'can we ship', 'can we import', 'can block import',
+        'can i ship', 'can we ship', 'can we import', 'can block import', 'import into',
         'what do i need', 'what documents', 'what paperwork',
         'dri for', 'point of contact', 'who owns',
         'hs code', 'tariff', 'customs', 'duty', 'duties',
-        'commercial invoice', 'incoterm', 'ddp', 'dap',
-        'export control', 'eccn', 'ear', 'itar',
-        'hand carry', 'hand-carry', 'handcarry',
+        'commercial invoice', 'incoterm',
+        'export control', 'hand carry', 'hand-carry', 'handcarry',
         'temporary import', 'ata carnet', 'carnet',
         'country of origin', 'marking requirement',
         'de minimis', 'low value',
@@ -804,27 +817,22 @@ def _is_process_question(question: str) -> bool:
         'ship to employee', 'shipping to employee',
         'engage logistics', 'logistics team',
         'classification request', 'classify',
-        'importer of record', 'ior',
-        'freight forwarder', 'broker',
-        'sla', 'transit time', 'shipping speed',
-        'return process', 'how to return', 'rma',
+        'importer of record', 'freight forwarder', 'broker',
+        'transit time', 'shipping speed',
+        'return process', 'how to return',
         'escalat', 'who to escalate',
         'warehouse receiving', 'hot receipt',
         'pallet', 'palletize',
     ]
-    # Check for process signals
-    if any(signal in q for signal in process_signals):
+    if any(signal in q for signal in process_phrases):
         return True
-    # Data signals — if these dominate, it's a data question
-    data_signals = [
-        'how many', 'how much', 'count', 'total',
-        'shipped', 'delivered', 'inventory', 'on hand', 'onhand',
-        'units', 'quantity', 'volume',
-        'last week', 'this week', 'yesterday', 'today',
-        'us-', 'order number', 'tracking',
-    ]
-    if any(signal in q for signal in data_signals):
-        return False
+
+    # Short keywords that need word-boundary matching to avoid false positives
+    # e.g., 'ear' in 'year', 'ior' in 'prior', 'sla' in 'slang', 'dap' in 'adapt'
+    boundary_keywords = ['ear', 'itar', 'eccn', 'ddp', 'dap', 'ior', 'sla', 'rma']
+    if any(re.search(rf'\b{kw}\b', q) for kw in boundary_keywords):
+        return True
+
     return False
 
 
@@ -1010,7 +1018,9 @@ def _check_casual_message(text: str) -> Optional[str]:
     greetings = ['hi', 'hey', 'hello', 'yo', 'sup', 'howdy', 'heya', 'hiya', 'whats up', "what's up"]
     how_are_you = ['how are you', 'hows it going', "how's it going", 'how you doing', "how's your day",
                    'how are things', 'what are you up to', 'you good', 'how goes it']
-    thanks = ['thanks', 'thank you', 'thx', 'ty', 'appreciate it', 'nice work', 'good job', 'great job', 'well done']
+    thanks = ['thanks', 'thank you', 'thx', 'appreciate it', 'nice work', 'good job', 'great job', 'well done']
+    # 'ty' checked separately with word boundary to avoid matching 'prototype', 'warranty', etc.
+    ty_match = bool(re.search(r'\bty\b', t))
     who_are_you = ['who are you', 'what are you', 'what do you do', 'what can you do', 'help']
 
     if any(t == g or t == g + '!' or t == g + '?' for g in greetings):
@@ -1032,7 +1042,7 @@ def _check_casual_message(text: str) -> Optional[str]:
         ]
         return f"{random.choice(responses)}"
 
-    if any(phrase in t for phrase in thanks):
+    if ty_match or any(phrase in t for phrase in thanks):
         responses = [
             "Happy to help! That's what I'm here for — delivering answers on time, every time 📬",
             "You got it! 🤖 Always here if you need another lookup.",
