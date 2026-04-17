@@ -1,13 +1,21 @@
 #!/bin/bash
-# Auto-restarting LGX-OPS-BOT listener
-# Restarts automatically if it crashes or Mac wakes from sleep
-# Run: ~/Desktop/Automation/lgx-ops-bot/scripts/start_listener.sh
+# Start the LGX-OPS-BOT Slack listener locally
+# Loads secrets from .env.local, runs with caffeinate to prevent sleep
 
-cd ~/Desktop/Automation/lgx-ops-bot
+cd "$(dirname "$0")/.." || exit 1
 
-while true; do
-    echo "[$(date)] Starting LGX-OPS-BOT listener..."
-    caffeinate -si python3 -u scripts/slack_listener.py 2>&1 | tee -a /tmp/lgx-ops-bot-listener.log
-    echo "[$(date)] Listener stopped. Restarting in 10 seconds..."
-    sleep 10
-done
+# Load local secrets
+if [ -f .env.local ]; then
+    export $(grep -v '^#' .env.local | xargs)
+    echo "✅ Loaded secrets from .env.local"
+else
+    echo "❌ .env.local not found — create it with SLACK_BOT_TOKEN=xoxb-..."
+    exit 1
+fi
+
+echo "Starting LGX-OPS-BOT listener..."
+caffeinate -s python3 -u scripts/slack_listener.py > /tmp/lgx-ops-bot-listener.log 2>&1 &
+sleep 3
+echo "✅ Listener started (PID: $!)"
+echo "📋 Log: tail -f /tmp/lgx-ops-bot-listener.log"
+tail -10 /tmp/lgx-ops-bot-listener.log
