@@ -55,7 +55,9 @@ if not os.environ.get("SLACK_BOT_TOKEN"):
 
 LGX_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 BOT_USER_ID = "U0ASVFR7NMB"  # @lgxopsbot Slack user ID
+ADMIN_USER_ID = "U04RK34LMFG"  # dsteffy — only admin can use learning commands
 CHANNEL_REFRESH_INTERVAL = 300  # Re-discover channels every 5 minutes
+LEARNED_FACTS_PATH = Path(__file__).parent.parent / 'shared' / 'learned_facts.json'
 
 # Cached channel list: {channel_id: {"name": ..., "oscar_cc": ..., "disclaimer": ...}}
 _discovered_channels: Dict[str, Dict] = {}
@@ -63,6 +65,11 @@ _last_channel_refresh: float = 0
 
 # Track which messages we've already processed (persists in memory)
 processed_threads: set = set()
+
+# Learned facts loaded from shared/learned_facts.json
+LEARNED_FACTS: List[Dict] = []
+# Users with a pending 'clear memory' confirmation
+_pending_clear_confirmations: set = set()
 
 # ============================================================================
 # CHANNEL DISCOVERY
@@ -106,22 +113,71 @@ def discover_channels() -> Dict[str, Dict]:
 
             for ch in data.get('channels', []):
                 ch_id = ch['id']
-                ch_name = ch.get('name', ch_id)
-                config = dict(DEFAULT_CHANNEL_CONFIG)
-                config['name'] = ch_name
-                if ch_id in CHANNEL_OVERRIDES:
-                    config.update(CHANNEL_OVERRIDES[ch_id])
+                if ch.get('is_im'):
+                    other_user = ch.get('user', ch_id)
+                    ch_name = f"DM-{other_user}"
+                    config = dict(DEFAULT_CHANNEL_CONFIG)
+                    config['name'] = ch_name
+                    config['is_dm'] = True
+                    config['dm_user'] = other_user
+                else:
+                    ch_name = ch.get('name', ch_id)
+                    config = dict(DEFAULT_CHANNEL_CONFIG)
+                    config['name'] = ch_name
+                    if ch_id in CHANNEL_OVERRIDES:
+                        config.update(CHANNEL_OVERRIDES[ch_id])
                 channels[ch_id] = config
 
             cursor = data.get('response_metadata', {}).get('next_cursor')
             if not cursor:
                 break
 
+        # Separately try to fetch DMs (requires im:read scope — may not be available)
+        try:
+            im_cursor = None
+            while True:
+                im_params = {'types': 'im', 'limit': '100'}
+                if im_cursor:
+                    im_params['cursor'] = im_cursor
+                im_resp = _requests.get(
+                    'https://slack.com/api/users.conversations',
+                    headers={'Authorization': f'Bearer {LGX_BOT_TOKEN}'},
+                    params=im_params,
+                    timeout=15
+                )
+                im_data = im_resp.json()
+                if not im_data.get('ok'):
+                    im_error = im_data.get('error', 'unknown')
+                    if im_error == 'missing_scope':
+                        print("  [CHANNELS] DMs disabled — bot needs im:read scope. Add at https://api.slack.com/apps")
+                    else:
+                        print(f"  [CHANNELS] DM fetch error: {im_error}")
+                    break
+
+                for ch in im_data.get('channels', []):
+                    ch_id = ch['id']
+                    other_user = ch.get('user', ch_id)
+                    ch_name = f"DM-{other_user}"
+                    config = dict(DEFAULT_CHANNEL_CONFIG)
+                    config['name'] = ch_name
+                    config['is_dm'] = True
+                    config['dm_user'] = other_user
+                    channels[ch_id] = config
+
+                im_cursor = im_data.get('response_metadata', {}).get('next_cursor')
+                if not im_cursor:
+                    break
+        except Exception as e:
+            print(f"  [CHANNELS] DM discovery failed: {e}")
+
         if channels:
             _discovered_channels = channels
             _last_channel_refresh = now
-            channel_names = sorted(c['name'] for c in channels.values())
-            print(f"  [CHANNELS] Watching {len(channels)} channels: {', '.join(channel_names)}")
+            dm_count = sum(1 for c in channels.values() if c.get('is_dm'))
+            ch_count = len(channels) - dm_count
+            channel_names = sorted(c['name'] for c in channels.values() if not c.get('is_dm'))
+            dm_label = f" + {dm_count} DMs" if dm_count else ""
+            print(f"  [CHANNELS] Watching {ch_count} channels{dm_label}: {', '.join(channel_names)}")
         else:
             print("  [CHANNELS] No channels found — is the bot added to any channels?")
 
@@ -150,6 +206,136 @@ def _load_playbook() -> str:
         _playbook_cache = ""
         print(f"  [PLAYBOOK] Not found at {playbook_path}")
     return _playbook_cache
+
+# ============================================================================
+# LEARNED FACTS
+# ============================================================================
+def _load_learned_facts() -> List[Dict]:
+    """Load learned facts from disk into LEARNED_FACTS global."""
+    global LEARNED_FACTS
+    if LEARNED_FACTS_PATH.exists():
+        try:
+            with open(LEARNED_FACTS_PATH) as f:
+                data = json.load(f)
+            LEARNED_FACTS = data.get('facts', [])
+            print(f"  [MEMORY] Loaded {len(LEARNED_FACTS)} learned fact(s)")
+        except Exception as e:
+            print(f"  [MEMORY] Failed to load learned facts: {e}")
+            LEARNED_FACTS = []
+    else:
+        LEARNED_FACTS = []
+    return LEARNED_FACTS
+
+
+def _save_learned_facts():
+    """Save LEARNED_FACTS to disk and reload global."""
+    global LEARNED_FACTS
+    LEARNED_FACTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(LEARNED_FACTS_PATH, 'w') as f:
+        json.dump({'facts': LEARNED_FACTS}, f, indent=2)
+    _load_learned_facts()
+
+
+def _get_learned_facts_prompt() -> str:
+    """Return formatted learned facts for injection into LLM prompts."""
+    if not LEARNED_FACTS:
+        return ""
+    lines = [f"- {f['fact']}" for f in LEARNED_FACTS]
+    return "LEARNED FACTS (from team feedback):\n" + "\n".join(lines)
+
+
+def _is_learning_command(text: str) -> bool:
+    """Check if a message looks like a learning command."""
+    t = text.lower().strip()
+    return (t.startswith('remember:') or t.startswith('correct:') or
+            t.startswith('forget:') or t == 'show memory' or t == 'clear memory')
+
+
+def _handle_learning_command(user_id: str, text: str) -> Optional[str]:
+    """Handle admin learning commands. Returns response text or None if not a command."""
+    global LEARNED_FACTS, _pending_clear_confirmations
+
+    t = text.strip()
+    t_lower = t.lower()
+
+    # Handle pending clear memory confirmation
+    if user_id in _pending_clear_confirmations and t_lower == 'yes':
+        _pending_clear_confirmations.discard(user_id)
+        LEARNED_FACTS = []
+        _save_learned_facts()
+        return "✅ Memory cleared. All learned facts have been removed."
+
+    if t_lower.startswith('remember:'):
+        fact_text = t[len('remember:'):].strip()
+        if not fact_text:
+            return "Please provide a fact to remember. Usage: `remember: <fact>`"
+        next_id = max((f['id'] for f in LEARNED_FACTS), default=0) + 1
+        LEARNED_FACTS.append({
+            'id': next_id,
+            'fact': fact_text,
+            'type': 'fact',
+            'added_at': datetime.now(timezone.utc).isoformat(),
+            'added_by': user_id,
+        })
+        _save_learned_facts()
+        return f"✅ Got it — I'll remember that. (fact #{next_id})"
+
+    elif t_lower.startswith('correct:'):
+        rest = t[len('correct:'):].strip()
+        if '→' in rest:
+            topic = rest.split('→', 1)[0].strip()
+        else:
+            topic = rest
+        next_id = max((f['id'] for f in LEARNED_FACTS), default=0) + 1
+        LEARNED_FACTS.append({
+            'id': next_id,
+            'fact': rest,
+            'type': 'correction',
+            'added_at': datetime.now(timezone.utc).isoformat(),
+            'added_by': user_id,
+        })
+        _save_learned_facts()
+        return f"✅ Correction noted for '{topic}'. I'll use this going forward."
+
+    elif t_lower.startswith('forget:'):
+        query = t[len('forget:'):].strip()
+        if not query:
+            return "Please specify what to forget. Usage: `forget: <N>` or `forget: <search text>`"
+        removed = None
+        if query.isdigit():
+            fact_id = int(query)
+            for i, f in enumerate(LEARNED_FACTS):
+                if f['id'] == fact_id:
+                    removed = LEARNED_FACTS.pop(i)
+                    break
+        else:
+            for i, f in enumerate(LEARNED_FACTS):
+                if query.lower() in f['fact'].lower():
+                    removed = LEARNED_FACTS.pop(i)
+                    break
+        if removed:
+            _save_learned_facts()
+            return f"✅ Forgot: '{removed['fact']}'"
+        return f"No fact found matching '{query}'."
+
+    elif t_lower == 'show memory':
+        if not LEARNED_FACTS:
+            return "No learned facts yet."
+        lines = []
+        for f in LEARNED_FACTS:
+            date_str = f.get('added_at', '')[:10]
+            type_tag = '[correction] ' if f.get('type') == 'correction' else ''
+            lines.append(f"#{f['id']} [{date_str}] {type_tag}{f['fact']}")
+        return "Learned facts:\n" + "\n".join(lines)
+
+    elif t_lower == 'clear memory':
+        if not LEARNED_FACTS:
+            return "No learned facts to clear."
+        _pending_clear_confirmations.add(user_id)
+        return f"Are you sure? This will remove all {len(LEARNED_FACTS)} learned facts. Reply 'yes' to confirm."
+
+    return None
+
 
 # ============================================================================
 # SNOWFLAKE CONNECTION
@@ -265,6 +451,34 @@ def post_thread(channel_id: str, thread_ts: str, text: str) -> str:
         return data.get('ts', '')
     except Exception as e:
         print(f"  [!] Slack post failed: {e} — skipping (will NOT fall back to sq agent-tools)")
+        return ''
+
+
+def post_message(channel_id: str, text: str) -> str:
+    """Post a direct message to a channel/DM (no thread_ts — used for DM replies)."""
+    if not LGX_BOT_TOKEN:
+        print(f"  [!] SLACK_BOT_TOKEN not set — refusing to post")
+        return ''
+    import requests as _requests
+    try:
+        resp = _requests.post(
+            'https://slack.com/api/chat.postMessage',
+            headers={'Authorization': f'Bearer {LGX_BOT_TOKEN}', 'Content-Type': 'application/json'},
+            json={
+                'channel': channel_id,
+                'text': text,
+                'unfurl_links': False,
+                'unfurl_media': False,
+            },
+            timeout=15
+        )
+        data = resp.json()
+        if not data.get('ok'):
+            print(f"  [!] Slack API error: {data.get('error', 'unknown')}")
+            return ''
+        return data.get('ts', '')
+    except Exception as e:
+        print(f"  [!] Slack post failed: {e}")
         return ''
 
 
@@ -518,6 +732,7 @@ def _generate_playbook_response(order_number: str, order_data: str,
             f"- Today's date: {today}\n\n"
             "PLAYBOOK REFERENCE (use for triage logic, escalation rules, SLA thresholds, carrier claim windows):\n"
             f"{playbook}\n"
+            + (f"\n{_get_learned_facts_prompt()}\n" if _get_learned_facts_prompt() else "")
         )
 
         user_msg = f"Ticket text from Slack:\n{ticket_text}\n\nOrder data from Snowflake:\n{order_data}"
@@ -661,7 +876,11 @@ def generate_sql_llm(question: str) -> Optional[str]:
             json={
                 'messages': [
                     {'role': 'system', 'content': 'You are a SQL expert. Return ONLY a Snowflake SQL query. No explanation, no markdown fences, no comments, no semicolons.'},
-                    {'role': 'user', 'content': f'{SCHEMA_CONTEXT}\n\nQuestion: {question}'}
+                    {'role': 'user', 'content': (
+                        f'{SCHEMA_CONTEXT}'
+                        + (f'\n\n{_get_learned_facts_prompt()}' if _get_learned_facts_prompt() else '')
+                        + f'\n\nQuestion: {question}'
+                    )}
                 ],
                 'max_tokens': 500
             },
@@ -869,6 +1088,7 @@ def answer_process_question(question: str, channel_config: Dict) -> Optional[str
                         "- Never guess HS codes, tariff rates, or export control classifications\n"
                         "- Do NOT start with bot name — the Slack app name shows automatically\n\n"
                         f"KNOWLEDGE BASE:\n{kb_context}"
+                        + (f"\n\n{_get_learned_facts_prompt()}" if _get_learned_facts_prompt() else "")
                     )},
                     {'role': 'user', 'content': question}
                 ],
@@ -1075,6 +1295,8 @@ def process_channel(channel_id: str, name: str, config: Dict):
 
     messages = parse_messages(raw)
     answered = 0
+    is_dm = config.get('is_dm', False)
+    dm_user = config.get('dm_user', '')
 
     # Only process messages from the last 2 hours
     cutoff_ts = time.time() - 7200
@@ -1088,23 +1310,50 @@ def process_channel(channel_id: str, name: str, config: Dict):
             continue
         if msg["ts"] in processed_threads:
             continue
-        if not is_question(msg["text"]):
-            continue
 
-        # Check thread for existing LGX-OPS-BOT reply
-        if msg["reply_count"] > 0:
-            thread_raw = read_thread(channel_id, msg["ts"])
-            if BOT_SIGNATURE in thread_raw:
-                processed_threads.add(msg["ts"])
-                continue
-
-        # We have a new question to answer!
+        # We have a new message to process!
         text = msg["text"].strip()
         # Strip Slack formatting: _italic_, *bold*, > quotes
         text = re.sub(r'^>\s*', '', text)  # leading quote
         text = re.sub(r'^_|_$', '', text.strip())  # surrounding italics
         text = re.sub(r'^\*|\*$', '', text.strip())  # surrounding bold
         text = text.strip()
+
+        # --- DM: handle learning commands first ---
+        if is_dm:
+            if dm_user == ADMIN_USER_ID:
+                cmd_response = _handle_learning_command(dm_user, text)
+                if cmd_response is not None:
+                    print(f"  [{name}] Learning command: {text[:60]}...")
+                    post_message(channel_id, cmd_response)
+                    processed_threads.add(msg["ts"])
+                    answered += 1
+                    continue
+                # Also check for pending 'yes' confirmation
+                if dm_user in _pending_clear_confirmations and text.lower().strip() == 'yes':
+                    cmd_response = _handle_learning_command(dm_user, text)
+                    if cmd_response is not None:
+                        post_message(channel_id, cmd_response)
+                        processed_threads.add(msg["ts"])
+                        answered += 1
+                        continue
+            elif _is_learning_command(text):
+                print(f"  [{name}] Non-admin learning command attempt")
+                post_message(channel_id, "Learning commands are admin-only. Ask @dsteffy to add this.")
+                processed_threads.add(msg["ts"])
+                answered += 1
+                continue
+
+        if not is_question(text):
+            continue
+
+        # Check thread for existing LGX-OPS-BOT reply (channels only)
+        if not is_dm and msg["reply_count"] > 0:
+            thread_raw = read_thread(channel_id, msg["ts"])
+            if BOT_SIGNATURE in thread_raw:
+                processed_threads.add(msg["ts"])
+                continue
+
         print(f"  [{name}] New question: {text[:80]}...")
 
         order = find_order_number(text)
@@ -1131,8 +1380,11 @@ def process_channel(channel_id: str, name: str, config: Dict):
                 response = answer_general_question(text, config)
 
         if response:
-            print(f"  [{name}] Posting response to thread {msg['ts']}")
-            post_thread(channel_id, msg["ts"], response)
+            print(f"  [{name}] Posting response ({('DM' if is_dm else 'thread')} {msg['ts']})")
+            if is_dm:
+                post_message(channel_id, response)
+            else:
+                post_thread(channel_id, msg["ts"], response)
             processed_threads.add(msg["ts"])
             answered += 1
         else:
@@ -1146,8 +1398,11 @@ def process_channel(channel_id: str, name: str, config: Dict):
                 "I'm drawing a blank on that one — must be a backorder 😅 I can help with order lookups, inventory, shipments, and delivery tracking though!",
             ]
             fallback = f"{random.choice(fallbacks)}"
-            print(f"  [{name}] Posting fallback to thread {msg['ts']}")
-            post_thread(channel_id, msg["ts"], fallback)
+            print(f"  [{name}] Posting fallback ({('DM' if is_dm else 'thread')} {msg['ts']})")
+            if is_dm:
+                post_message(channel_id, fallback)
+            else:
+                post_thread(channel_id, msg["ts"], fallback)
             processed_threads.add(msg["ts"])
 
 
@@ -1304,6 +1559,9 @@ def main():
     print(f"  Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*50}\n")
 
+    # Load learned facts
+    _load_learned_facts()
+
     # Initial channel discovery
     channels = discover_channels()
     if not channels:
@@ -1317,8 +1575,9 @@ def main():
                 ch_name = config.get('name', ch_id)
                 # Process new top-level messages
                 process_channel(ch_id, ch_name, config)
-                # Check threads for @mentions
-                check_thread_mentions(ch_id, ch_name, config)
+                # Check threads for @mentions (channels only — DMs don't have thread mentions)
+                if not config.get('is_dm'):
+                    check_thread_mentions(ch_id, ch_name, config)
         except KeyboardInterrupt:
             print("\nStopping listener...")
             break
