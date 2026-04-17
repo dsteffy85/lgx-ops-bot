@@ -41,6 +41,18 @@ DEFAULT_CHANNEL_CONFIG = {
 OSCAR_ID = "U02DXNZF8SF"
 POLL_INTERVAL = 10  # seconds
 BOT_SIGNATURE = "LGX-OPS-BOT"
+
+# Load .env.local if SLACK_BOT_TOKEN not already in environment
+if not os.environ.get("SLACK_BOT_TOKEN"):
+    _env_path = Path(__file__).resolve().parent.parent / ".env.local"
+    if _env_path.exists():
+        with open(_env_path) as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _key, _val = _line.split("=", 1)
+                    os.environ[_key.strip()] = _val.strip()
+
 LGX_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 BOT_USER_ID = "U0ASVFR7NMB"  # @lgxopsbot Slack user ID
 CHANNEL_REFRESH_INTERVAL = 300  # Re-discover channels every 5 minutes
@@ -224,7 +236,14 @@ def read_thread(channel_id: str, thread_ts: str) -> str:
 
 
 def post_thread(channel_id: str, thread_ts: str, text: str) -> str:
-    """Post a threaded reply as the LGX-OPS-BOT Slack app."""
+    """Post a threaded reply as the LGX-OPS-BOT Slack app.
+    
+    NEVER falls back to sq agent-tools — that posts as dsteffy.
+    If the bot token is missing or the API call fails, log the error and skip.
+    """
+    if not LGX_BOT_TOKEN:
+        print(f"  [!] SLACK_BOT_TOKEN not set — refusing to post (would appear as dsteffy)")
+        return ''
     import requests as _requests
     try:
         resp = _requests.post(
@@ -241,21 +260,12 @@ def post_thread(channel_id: str, thread_ts: str, text: str) -> str:
         )
         data = resp.json()
         if not data.get('ok'):
-            print(f"  [!] Slack API error: {data.get('error', 'unknown')}")
-            # Fallback to sq agent-tools
-            escaped = text.replace("'", "'\\''")
-            return slack_cmd(
-                f"post-message --channel-id {channel_id} --thread-ts {thread_ts} "
-                f"--text '{escaped}'"
-            )
+            print(f"  [!] Slack API error: {data.get('error', 'unknown')} — skipping (will NOT fall back to sq agent-tools)")
+            return ''
         return data.get('ts', '')
     except Exception as e:
-        print(f"  [!] Direct Slack post failed: {e}, falling back to sq agent-tools")
-        escaped = text.replace("'", "'\\''")
-        return slack_cmd(
-            f"post-message --channel-id {channel_id} --thread-ts {thread_ts} "
-            f"--text '{escaped}'"
-        )
+        print(f"  [!] Slack post failed: {e} — skipping (will NOT fall back to sq agent-tools)")
+        return ''
 
 
 # ============================================================================
@@ -554,6 +564,21 @@ def _load_schema_context() -> str:
 SCHEMA_CONTEXT = _load_schema_context()
 
 
+def _load_logistics_kb() -> str:
+    """Load logistics knowledge base from shared/logistics_knowledge_base.md.
+    
+    Source: https://github.com/squareup/logistics-knowledge-base
+    Contains process docs, shipping guides, DRI routing, SLAs, and escalation paths.
+    """
+    kb_path = Path(__file__).parent.parent / 'shared' / 'logistics_knowledge_base.md'
+    if kb_path.exists():
+        return kb_path.read_text()
+    print("  [!] logistics_knowledge_base.md not found — process questions will fall back to SQL")
+    return ""
+
+LOGISTICS_KB = _load_logistics_kb()
+
+
 def _get_databricks_token() -> Optional[str]:
     """Get a valid Databricks access token, refreshing if expired."""
     import requests as _requests
@@ -751,6 +776,107 @@ def _format_answer_llm(question: str, cols: List[str], rows: List[tuple]) -> Opt
             return answer
     except Exception as e:
         print(f"  [!] Answer formatting failed: {e}")
+    return None
+
+
+def _is_process_question(question: str) -> bool:
+    """Detect if a question is about logistics processes/policy rather than data.
+    
+    Process questions ask "how do I", "what's the process", "who handles", etc.
+    Data questions ask about numbers, counts, orders, inventory levels, etc.
+    """
+    q = question.lower()
+    process_signals = [
+        'how do i', 'how to', 'what is the process', "what's the process",
+        'who handles', 'who do i', 'who should i', 'who is responsible',
+        'where do i', 'where should i', 'where can i',
+        'can i ship', 'can we ship', 'can we import', 'can block import',
+        'what do i need', 'what documents', 'what paperwork',
+        'dri for', 'point of contact', 'who owns',
+        'hs code', 'tariff', 'customs', 'duty', 'duties',
+        'commercial invoice', 'incoterm', 'ddp', 'dap',
+        'export control', 'eccn', 'ear', 'itar',
+        'hand carry', 'hand-carry', 'handcarry',
+        'temporary import', 'ata carnet', 'carnet',
+        'country of origin', 'marking requirement',
+        'de minimis', 'low value',
+        'new lane', 'new inbound lane',
+        'ship to employee', 'shipping to employee',
+        'engage logistics', 'logistics team',
+        'classification request', 'classify',
+        'importer of record', 'ior',
+        'freight forwarder', 'broker',
+        'sla', 'transit time', 'shipping speed',
+        'return process', 'how to return', 'rma',
+        'escalat', 'who to escalate',
+        'warehouse receiving', 'hot receipt',
+        'pallet', 'palletize',
+    ]
+    # Check for process signals
+    if any(signal in q for signal in process_signals):
+        return True
+    # Data signals — if these dominate, it's a data question
+    data_signals = [
+        'how many', 'how much', 'count', 'total',
+        'shipped', 'delivered', 'inventory', 'on hand', 'onhand',
+        'units', 'quantity', 'volume',
+        'last week', 'this week', 'yesterday', 'today',
+        'us-', 'order number', 'tracking',
+    ]
+    if any(signal in q for signal in data_signals):
+        return False
+    return False
+
+
+def answer_process_question(question: str, channel_config: Dict) -> Optional[str]:
+    """Answer a logistics process/policy question using the knowledge base."""
+    if not LOGISTICS_KB:
+        return None
+    
+    try:
+        import requests as _requests
+
+        host = os.environ.get('DATABRICKS_HOST', 'https://block-lakehouse-production.cloud.databricks.com')
+        token = _get_databricks_token()
+        if not token:
+            return None
+
+        # Truncate KB to ~40K chars to stay within context limits
+        kb_context = LOGISTICS_KB[:40000]
+
+        resp = _requests.post(
+            f'{host}/serving-endpoints/goose-claude-4-5-haiku/invocations',
+            headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+            json={
+                'messages': [
+                    {'role': 'system', 'content': (
+                        "You are LGX-OPS-BOT, a logistics assistant for Block's Hardware Operations team. "
+                        "Answer the question using ONLY the knowledge base provided below. "
+                        "Rules:\n"
+                        "- Be concise — max 8 lines\n"
+                        "- Use Slack formatting: *bold* for key terms, bullet points\n"
+                        "- Link to go/ links and resources when relevant\n"
+                        "- When routing to a person, give their @username from the DRI table\n"
+                        "- If the KB doesn't cover the question, say so and suggest who to ask\n"
+                        "- Never guess HS codes, tariff rates, or export control classifications\n"
+                        "- Do NOT start with bot name — the Slack app name shows automatically\n\n"
+                        f"KNOWLEDGE BASE:\n{kb_context}"
+                    )},
+                    {'role': 'user', 'content': question}
+                ],
+                'max_tokens': 600
+            },
+            timeout=30
+        )
+
+        if resp.ok:
+            answer = resp.json()['choices'][0]['message']['content'].strip()
+            print(f"  [KB] Process answer ({len(answer)} chars)")
+            return answer
+        else:
+            print(f"  [KB] LLM failed: {resp.status_code} {resp.text[:200]}")
+    except Exception as e:
+        print(f"  [KB] Error: {e}")
     return None
 
 
@@ -974,17 +1100,25 @@ def process_channel(channel_id: str, name: str, config: Dict):
         order = find_order_number(text)
         response = None
 
-        # Check for casual/greeting messages first
-        casual = _check_casual_message(text)
-        if casual:
-            response = casual
-        elif order:
-            # Order lookup — pass ticket text for playbook triage
+        # Order lookup takes priority — tickets with order numbers always get triage
+        if order:
             data = lookup_order(order)
             response = format_order_response(order, data, config, ticket_text=text)
         else:
-            # General question
-            response = answer_general_question(text, config)
+            # Check for casual/greeting messages (only when no order number)
+            casual = _check_casual_message(text)
+            if casual:
+                response = casual
+            elif _is_process_question(text):
+                # Process/policy question — answer from logistics KB
+                print(f"  [{name}] Process question detected")
+                response = answer_process_question(text, config)
+                if not response:
+                    # Fall back to SQL path in case it's a hybrid question
+                    response = answer_general_question(text, config)
+            else:
+                # General data question
+                response = answer_general_question(text, config)
 
         if response:
             print(f"  [{name}] Posting response to thread {msg['ts']}")
@@ -1110,19 +1244,29 @@ def check_thread_mentions(channel_id: str, name: str, config: Dict):
             order = find_order_number(clean_text) or find_order_number(parent_text)
             response = None
 
-            # Check casual first
-            casual = _check_casual_message(clean_text)
-            if casual:
-                response = casual
-            elif order:
+            # Order lookup takes priority — tickets with order numbers always get triage
+            if order:
                 data_result = lookup_order(order)
                 response = format_order_response(order, data_result, config, ticket_text=full_context)
             else:
-                response = answer_general_question(clean_text, config)
+                # Check casual only when no order number present
+                casual = _check_casual_message(clean_text)
+                if casual:
+                    response = casual
+                elif _is_process_question(clean_text):
+                    print(f"  [{name}] Process question detected (@mention)")
+                    response = answer_process_question(clean_text, config)
+                    if not response:
+                        response = answer_general_question(clean_text, config)
+                else:
+                    response = answer_general_question(clean_text, config)
 
             if not response:
                 # Try with full thread context
-                response = answer_general_question(full_context, config)
+                if _is_process_question(full_context):
+                    response = answer_process_question(full_context, config)
+                if not response:
+                    response = answer_general_question(full_context, config)
 
             if response:
                 print(f"  [{name}] Replying to @mention in thread {thread_ts}")
