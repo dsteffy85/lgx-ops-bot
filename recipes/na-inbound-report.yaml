@@ -1,0 +1,152 @@
+version: "1.0"
+title: "NA Inbound GR Report → Google Sheet"
+description: "Pulls 841 inbound data from Snowflake (7-day rolling window, CVU/IMC/IMU) and pushes to the NA Inbound GR spreadsheet"
+
+extensions:
+  - name: developer
+    type: builtin
+
+provider: anthropic
+model: claude-sonnet-4-20250514
+max_turns: 10
+
+prompt: |
+  Run this Python script exactly as written. Do not modify it.
+
+  ```
+  python3 << 'PYEOF'
+  import json, subprocess, urllib.request, urllib.parse, datetime
+
+  SHEET_ID = "1repdjFbPTSnahq9xgpaBxefDAsvLtwvxp-WafEuSN78"
+  SHEET_GID = 0
+
+  # Step 1: Get OAuth token from keychain
+  print("Step 1: Getting OAuth token...")
+  result = subprocess.run(
+      ["security", "find-generic-password", "-s", "mcp_google_drive", "-a", "oauth_token_gdrive", "-w"],
+      capture_output=True, text=True
+  )
+  token_data = json.loads(result.stdout.strip())
+
+  refresh_data = urllib.parse.urlencode({
+      'client_id': token_data['client_id'],
+      'client_secret': token_data['client_secret'],
+      'refresh_token': token_data['refresh_token'],
+      'grant_type': 'refresh_token'
+  }).encode()
+  req = urllib.request.Request('https://oauth2.googleapis.com/token', data=refresh_data)
+  resp = urllib.request.urlopen(req)
+  access_token = json.loads(resp.read())['access_token']
+  print(f"  Token refreshed ({len(access_token)} chars)")
+
+  # Step 2: Query Snowflake via LGX_OPS_BOT key pair auth
+  print("Step 2: Querying Snowflake...")
+  import glob, os, sys
+  from cryptography.hazmat.primitives import serialization
+  from cryptography.hazmat.backends import default_backend
+  import snowflake.connector
+
+  key_files = glob.glob(os.path.expanduser("~/Desktop/Automation/lgx-ops-bot/credentials/LGX_OPS_BOT_private_keys_*.json"))
+  with open(key_files[0]) as f:
+      key_data = json.load(f)
+
+  p_key = serialization.load_pem_private_key(
+      key_data['square']['private_key'].encode('utf-8'),
+      password=None, backend=default_backend()
+  )
+  pkb = p_key.private_bytes(
+      encoding=serialization.Encoding.DER,
+      format=serialization.PrivateFormat.PKCS8,
+      encryption_algorithm=serialization.NoEncryption()
+  )
+
+  conn = snowflake.connector.connect(
+      account='square',
+      user='LGX_OPS_BOT@squareup.com',
+      private_key=pkb,
+      warehouse='ETL__MEDIUM',
+      role='ORACLE_ERP__SNOWFLAKE__READ_ONLY'
+  )
+  cursor = conn.cursor()
+
+  query = """
+  SELECT
+      TO_CHAR(TO_DATE(ADJUSTMENT_DATE), 'YYYY-MM-DD') AS ADJUSTMENT_DATE,
+      FACILILTY_ID AS FACILITY_ID,
+      ITEM_CODE,
+      ITEM_DESCRIPTION,
+      PRODUCT_NAME,
+      COALESCE(SUM(AVL_QUANTITY), 0) AS AVL_QUANTITY,
+      COALESCE(SUM(UNAVL_QUANTITY), 0) AS UNAVL_QUANTITY
+  FROM ORACLE_ERP.SCM.SQ_841_INBOUND_V
+  WHERE TENANT IN ('SQ','SQ1')
+    AND FACILILTY_ID IN ('CVU', 'IMC', 'IMU')
+    AND REMARKS = 'STAT'
+    AND ADJUSTMENT_DATE >= DATEADD('day', -6, CURRENT_DATE())
+    AND ADJUSTMENT_DATE < DATEADD('day', 7, DATEADD('day', -6, CURRENT_DATE()))
+  GROUP BY TO_DATE(ADJUSTMENT_DATE), FACILILTY_ID, ITEM_CODE, ITEM_DESCRIPTION, PRODUCT_NAME
+  ORDER BY 1, 2, 3, 4, 5
+  """
+  cursor.execute(query)
+  columns = [desc[0] for desc in cursor.description]
+  rows = cursor.fetchall()
+  conn.close()
+  print(f"  Got {len(rows)} rows, {len(columns)} columns")
+
+  # Step 3: Clear CVU/IMC/IMU tab
+  print("Step 3: Clearing sheet...")
+  clear_url = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values:batchClear"
+  clear_body = json.dumps({"ranges": ["'CVU/IMC/IMU'!A1:Z"]}).encode()
+  req = urllib.request.Request(clear_url, data=clear_body, headers={
+      "Authorization": f"Bearer {access_token}",
+      "Content-Type": "application/json"
+  })
+  urllib.request.urlopen(req)
+  print("  Cleared")
+
+  # Step 4: Write header + data + timestamp using batchUpdate values (handles slashes in sheet name)
+  print("Step 4: Writing data...")
+  header = ["Adjustment Date", "Facility ID", "Item Code", "Item Description", "Product Name", "Avl Quantity", "Unavl Quantity"]
+  now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=-7)))
+  timestamp = now.strftime("Last updated: %B %d, %Y at %I:%M %p PST")
+
+  values = [header + [timestamp]]
+  for row in rows:
+      values.append([str(v) if v is not None else "" for v in row])
+
+  write_url = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values:batchUpdate"
+  write_body = json.dumps({
+      "valueInputOption": "USER_ENTERED",
+      "data": [{"range": "'CVU/IMC/IMU'!A1", "values": values}]
+  }).encode()
+  req = urllib.request.Request(write_url, data=write_body, headers={
+      "Authorization": f"Bearer {access_token}",
+      "Content-Type": "application/json"
+  })
+  resp = urllib.request.urlopen(req)
+  result = json.loads(resp.read())
+  print(f"  Written: {result.get('totalUpdatedRows', '?')} rows")
+
+  # Step 5: Format timestamp cell (italic, gray)
+  print("Step 5: Formatting timestamp...")
+  fmt_url = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}:batchUpdate"
+  fmt_body = json.dumps({"requests": [{
+      "repeatCell": {
+          "range": {"sheetId": SHEET_GID, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 7, "endColumnIndex": 8},
+          "cell": {"userEnteredFormat": {
+              "textFormat": {"italic": True, "foregroundColor": {"red": 0.5, "green": 0.5, "blue": 0.5}}
+          }},
+          "fields": "userEnteredFormat.textFormat"
+      }
+  }]}).encode()
+  req = urllib.request.Request(fmt_url, data=fmt_body, headers={
+      "Authorization": f"Bearer {access_token}",
+      "Content-Type": "application/json"
+  })
+  urllib.request.urlopen(req)
+
+  print(f"\nDone! {len(rows)} rows pushed to CVU/IMC/IMU tab. {timestamp}")
+  PYEOF
+  ```
+
+  Report the output. If it succeeds, say "NA Inbound GR report updated successfully" and show the row count and timestamp.

@@ -2,12 +2,11 @@
 Thin wrapper around scripts/slack_listener.py — bridges into the bot package
 without rewriting the existing listener logic.
 
-Sets environment-driven config values, then delegates to slack_listener.main().
+Patches config values into the listener module, then delegates to slack_listener.main().
 """
 
 import importlib.util
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -31,33 +30,28 @@ def _load_listener_module():
     return module
 
 
-def _inject_env() -> None:
-    """Push bot.config values into the environment so the legacy script picks
-    them up via its own os.environ / constant reads."""
-    env_map = {
-        "SLACK_BOT_TOKEN": config.SLACK_BOT_TOKEN,
-        "SNOWFLAKE_PRIVATE_KEY_PATH": config.SNOWFLAKE_PRIVATE_KEY_PATH,
-        "SNOWFLAKE_ACCOUNT": config.SNOWFLAKE_ACCOUNT,
-        "SNOWFLAKE_USER": config.SNOWFLAKE_USER,
-        "SNOWFLAKE_WAREHOUSE": config.SNOWFLAKE_WAREHOUSE,
-        "SNOWFLAKE_ROLE": config.SNOWFLAKE_ROLE,
-        "DATABRICKS_HOST": config.DATABRICKS_HOST,
-        "DATABRICKS_TOKEN_PATH": config.DATABRICKS_TOKEN_PATH,
-        "POLL_INTERVAL": str(config.POLL_INTERVAL),
-        "BOT_USER_ID": config.BOT_USER_ID,
-    }
-    for key, value in env_map.items():
-        if value:
-            os.environ.setdefault(key, value)
-
-
 def run() -> None:
-    """Configure environment, load the listener module, and run its main()."""
-    logger.info("Injecting config into environment")
-    _inject_env()
-
+    """Load the listener module, patch config, and run its main()."""
     logger.info("Loading slack_listener from %s", _SCRIPT_PATH)
     listener = _load_listener_module()
+
+    # Patch the listener's constants with values from bot.config
+    # (the listener uses module-level constants, not env vars)
+    listener.LGX_BOT_TOKEN = config.SLACK_BOT_TOKEN
+    listener.BOT_USER_ID = config.BOT_USER_ID
+    listener.BOT_SIGNATURE = config.BOT_SIGNATURE
+    listener.OSCAR_ID = config.OSCAR_ID
+    listener.POLL_INTERVAL = config.POLL_INTERVAL
+    listener.CHANNEL_OVERRIDES = {
+        config.HARDWAREDELIVERYHELP_ID: {
+            "oscar_cc": True,
+            "disclaimer": True,
+        },
+    }
+
+    logger.info("Config patched — Slack token: %s..., Poll: %ds",
+                config.SLACK_BOT_TOKEN[:15] if config.SLACK_BOT_TOKEN else "EMPTY",
+                config.POLL_INTERVAL)
 
     # Signal health endpoint that the listener is starting
     mark_listener_ready()

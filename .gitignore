@@ -25,3 +25,5 @@ __pycache__/
 .idea/
 *.swp
 *.swo
+credentials/
+.env.local
