@@ -1,0 +1,13 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: lgx-ops-bot
+  namespace: sq-logistics
+  labels:
+    app: lgx-ops-bot
+    team: sq-logistics
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: lgx-ops-bot

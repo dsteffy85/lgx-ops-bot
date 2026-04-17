@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lgx-ops-bot
+  namespace: sq-logistics
+  labels:
+    app: lgx-ops-bot
+    team: sq-logistics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lgx-ops-bot
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: lgx-ops-bot
+        team: sq-logistics
+    spec:
+      serviceAccountName: lgx-ops-bot
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: lgx-ops-bot
+          image: docker.sqprod.co/sq-logistics/lgx-ops-bot:{{IMAGE_TAG}}
+          imagePullPolicy: Always
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: SLACK_BOT_TOKEN_PATH
+              value: /etc/secrets/slack/token
+            - name: SNOWFLAKE_PRIVATE_KEY_PATH
+              value: /etc/secrets/snowflake/private_key.pem
+            - name: SNOWFLAKE_ACCOUNT
+              value: "square"
+            - name: SNOWFLAKE_USER
+              value: "LGX_OPS_BOT@squareup.com"
+            - name: SNOWFLAKE_WAREHOUSE
+              value: "ETL__MEDIUM"
+            - name: SNOWFLAKE_ROLE
+              value: "LGX_OPS_BOT__SNOWFLAKE__ADMIN"
+            - name: DATABRICKS_HOST
+              value: "https://block-lakehouse-production.cloud.databricks.com"
+            - name: DATABRICKS_TOKEN_PATH
+              value: /etc/secrets/databricks/token
+            - name: POLL_INTERVAL
+              value: "10"
+            - name: BOT_USER_ID
+              value: "U0ASVFR7NMB"
+            - name: LOG_LEVEL
+              value: "INFO"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: slack-token
+              mountPath: /etc/secrets/slack
+              readOnly: true
+            - name: snowflake-key
+              mountPath: /etc/secrets/snowflake
+              readOnly: true
+            - name: databricks-token
+              mountPath: /etc/secrets/databricks
+              readOnly: true
+      volumes:
+        - name: slack-token
+          secret:
+            secretName: lgx-ops-bot-slack-token
+        - name: snowflake-key
+          secret:
+            secretName: lgx-ops-bot-snowflake-key
+        - name: databricks-token
+          secret:
+            secretName: lgx-ops-bot-databricks-token

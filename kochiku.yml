@@ -1,0 +1,26 @@
+# =============================================================================
+# Kochiku / Buildkite CI — LGX-OPS-BOT Docker image build
+# =============================================================================
+version: 2
+
+build:
+  type: docker
+  docker:
+    image_name: lgx-ops-bot
+    dockerfile: Dockerfile
+    context: .
+    build_args: {}
+
+  # Run basic smoke test after build
+  post_build:
+    - docker run --rm lgx-ops-bot python -c "from bot import config; print('config OK')"
+
+# Push to internal registry on main branch
+publish:
+  branches:
+    - main
+  registry: docker.sqprod.co
+  repository: sq-logistics/lgx-ops-bot
+  tag_with_git_sha: true
+  additional_tags:
+    - latest

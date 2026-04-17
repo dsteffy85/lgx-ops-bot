@@ -2,3 +2,4 @@ snowflake-connector-python==3.12.3
 cryptography==43.0.3
 gspread==6.1.4
 google-auth==2.36.0
+python-json-logger==2.0.7
