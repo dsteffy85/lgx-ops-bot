@@ -654,11 +654,29 @@ def format_order_response(order_number: str, data: Dict, channel_config: Dict,
             f"TOTAL_ITEMS: {s.get('TOTAL_ITEMS', 'n/a')}\n"
         )
 
+    # --- Detect region and enrich ticket context for EU/UK/AU orders ---
+    region = _get_region_from_order(order_number)
+    if region != 'US':
+        parsed = parse_eu_ticket(ticket_text)
+        eu_context = ""
+        if parsed.get('issue_type'):
+            eu_context += f"Issue type: {parsed['issue_type']}\n"
+        if parsed.get('details'):
+            eu_context += f"Details: {parsed['details']}\n"
+        if parsed.get('merchant_token'):
+            eu_context += f"Merchant token: {parsed['merchant_token']}\n"
+        if parsed.get('team'):
+            eu_context += f"Team: {parsed['team']}\n"
+        if eu_context:
+            ticket_text = eu_context + "\n" + ticket_text
+        print(f"  [TRIAGE] {region} order detected: {order_number}")
+
     # --- For #hardwaredeliveryhelp: use playbook + LLM for enriched response ---
     playbook = _load_playbook()
     if playbook and channel_config.get("oscar_cc"):
         enriched = _generate_playbook_response(order_number, order_data_summary,
-                                                ticket_text, playbook, channel_config)
+                                                ticket_text, playbook, channel_config,
+                                                region=region)
         if enriched:
             return enriched
 
@@ -701,7 +719,8 @@ def format_order_response(order_number: str, data: Dict, channel_config: Dict,
 
 def _generate_playbook_response(order_number: str, order_data: str,
                                  ticket_text: str, playbook: str,
-                                 channel_config: Dict) -> Optional[str]:
+                                 channel_config: Dict,
+                                 region: str = 'US') -> Optional[str]:
     """Use the playbook + LLM to generate an enriched triage response."""
     try:
         import requests as _requests
@@ -712,6 +731,15 @@ def _generate_playbook_response(order_number: str, order_data: str,
             return None
 
         today = datetime.now().strftime('%Y-%m-%d')
+
+        # Region-specific carrier guidance for the prompt
+        region_carrier_notes = {
+            'UK': "UK carrier: DPD. B2C=1 attempt then parcel shop 5 days. B2B=2 attempts then RTS. Return location: Coalville.",
+            'EU': "EU carrier: UPS. B2C=1 attempt + 5 days at Access Point. B2B=3 attempts then RTS. Return location: Born (FR/ES/IE).",
+            'AU': "AU carriers: Australia Post (1 attempt, depot 10 days) or StarTrack (2 attempts). Return location: Villawood.",
+        }
+        carrier_note = region_carrier_notes.get(region, "")
+        is_intl = region != 'US'
 
         system_prompt = (
             "You are LGX-OPS-BOT, an automated fulfillment triage assistant for #hardwaredeliveryhelp. "
@@ -729,9 +757,15 @@ def _generate_playbook_response(order_number: str, order_data: str,
             "- Do NOT promise refunds, generate labels, or take actions — only recommend\n"
             "- If the order is overdue, calculate days overdue from today's date\n"
             "- Always mention tracking number(s) so the submitter can check carrier status\n"
-            f"- Today's date: {today}\n\n"
+            + (f"- This is a {region} order — apply {region}-specific SLAs, carrier rules, and return locations\n"
+               f"- {carrier_note}\n"
+               "- Flag for SAS escalation if order value > $200; notify LGX if > $500\n"
+               if is_intl else "")
+            + f"- Today's date: {today}\n\n"
             "PLAYBOOK REFERENCE (use for triage logic, escalation rules, SLA thresholds, carrier claim windows):\n"
             f"{playbook}\n"
+            + (f"\nEU/UK/AU FAQ (SLAs, carrier rules, return flows, escalation thresholds):\n{EU_UK_AU_FAQ}\n"
+               if is_intl and EU_UK_AU_FAQ else "")
             + (f"\n{_get_learned_facts_prompt()}\n" if _get_learned_facts_prompt() else "")
         )
 
@@ -792,6 +826,91 @@ def _load_logistics_kb() -> str:
     return ""
 
 LOGISTICS_KB = _load_logistics_kb()
+
+
+def _load_eu_uk_au_faq() -> str:
+    """Load EU/UK/AU fulfillment FAQ from shared/eu_uk_au_faq.md."""
+    faq_path = Path(__file__).parent.parent / 'shared' / 'eu_uk_au_faq.md'
+    if faq_path.exists():
+        content = faq_path.read_text()
+        print(f"  [EU FAQ] Loaded {len(content):,} chars from {faq_path.name}")
+        return content
+    print("  [EU FAQ] eu_uk_au_faq.md not found")
+    return ""
+
+EU_UK_AU_FAQ = _load_eu_uk_au_faq()
+
+# Prefixes that map to regions
+_EU_PREFIXES = {'FR', 'IE', 'ES'}
+_UK_PREFIXES = {'GB'}
+_AU_PREFIXES = {'AU', 'NZ', 'SG'}
+
+
+def _get_region_from_order(order_number: str) -> str:
+    """Return region string for an order number: 'UK', 'EU', 'AU', or 'US'."""
+    prefix = order_number[:2].upper()
+    if prefix in _UK_PREFIXES:
+        return 'UK'
+    if prefix in _EU_PREFIXES:
+        return 'EU'
+    if prefix in _AU_PREFIXES:
+        return 'AU'
+    return 'US'
+
+
+def parse_eu_ticket(text: str) -> Dict[str, str]:
+    """Parse a structured EU/UK/AU Request Manager ticket into key fields.
+
+    Handles the structured format posted by the Request Manager bot:
+        Order Number
+        ES-028968397
+        Country
+        ES
+        Issue with the order
+        Order Not Delivered
+        ...
+    """
+    result: Dict[str, str] = {
+        'order_number': '',
+        'country': '',
+        'issue_type': '',
+        'details': '',
+        'merchant_token': '',
+        'team': '',
+    }
+
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+
+    # Walk lines looking for label → value pairs
+    label_map = {
+        'order number': 'order_number',
+        'country': 'country',
+        'issue with the order': 'issue_type',
+        'issue with the order (order must be over 200 gbp/eur)': 'issue_type',
+        'please provide more details': 'details',
+        'please provide more details of your query': 'details',
+        'merchant token': 'merchant_token',
+        'what team do you belong to?': 'team',
+        'what team do you belong to': 'team',
+    }
+
+    i = 0
+    while i < len(lines):
+        key = lines[i].lower().rstrip('?').strip()
+        if key in label_map and i + 1 < len(lines):
+            field = label_map[key]
+            result[field] = lines[i + 1]
+            i += 2
+        else:
+            i += 1
+
+    # Fallback: pull order number from text if not found via label
+    if not result['order_number']:
+        found = find_order_number(text)
+        if found:
+            result['order_number'] = found
+
+    return result
 
 
 def _get_databricks_token() -> Optional[str]:
@@ -1183,9 +1302,9 @@ def parse_messages(raw: str) -> List[Dict]:
 
 
 def find_order_number(text: str) -> Optional[str]:
-    """Extract a US-XXXXXXXXX or CA-XXXXXXXXX or GB-XXXXXXXXX order number from text."""
-    # Match US-, CA-, GB- order numbers (with optional -WR suffix for warranty returns)
-    match = re.search(r'(?:US|CA|GB)-\d{6,}(?:-WR)?', text, re.IGNORECASE)
+    """Extract an order number from text. Supports all regions: US, CA, GB, IE, FR, ES, AU, NZ, SG, etc."""
+    # Broad pattern: 2-letter country prefix + dash + 6-9 digits (with optional -WR suffix)
+    match = re.search(r'\b[A-Z]{2}-\d{6,9}(?:-WR)?\b', text, re.IGNORECASE)
     return match.group().upper() if match else None
 
 
