@@ -979,6 +979,91 @@ def _get_databricks_token() -> Optional[str]:
     return token_data['access_token']
 
 
+def _check_canned_query(question: str) -> Optional[str]:
+    """Check if question matches a canned inbound shipment report query.
+    
+    Returns proven SQL for common report requests instead of LLM-generated SQL.
+    Source: shared/inbound_shipment_queries.md
+    """
+    q = question.lower()
+
+    # All Block inbound shipments
+    if any(p in q for p in ['all block shipments', 'all inbound shipments', 'inbound shipment report',
+                             'block shipment report', 'all shipments report']):
+        return """SELECT ff.SHIPMENT_ID, ff.HOUSE_BOL, ff.MASTER_BOL, ff.INCO_TERM,
+            asn_sku.PO_NUMBERS, asn_sku.SKU, asn_sku.TOTAL_SKU_QUANTITY, asn_sku.SHIP_TO_FACILITY,
+            ff.FORWARDER, ff.TRANSPORTATION_METHOD AS "Mode", ff.SHIPPER_NAME,
+            ff.ORIGIN_COUNTRY, ff.DESTINATION_COUNTRY,
+            COALESCE(asn_sku.SHIP_TO_FACILITY, ff.CONSIGNEE_NAME) AS "Destination",
+            DATE(ff.BOOKING_DATE) AS "BOOKING_DATE",
+            DATE(ff.ESTIMATED_DELIVERY_DATE) AS "ESTIMATED_DELIVERY_DATE",
+            DATE(ff.ACTUAL_DELIVERY_DATE) AS "ACTUAL_DELIVERY_DATE",
+            ff.PIECES, ff.GROSS_WEIGHT, ff.GROSS_WEIGHT_UOM
+        FROM ORACLE_ERP.SCM.SQ_FF_SHIPMENT_INFO ff
+        LEFT JOIN (
+            SELECT TRACKING_NUMBER, PART_NUMBER AS SKU,
+                LISTAGG(DISTINCT PO_NUMBER, ', ') WITHIN GROUP (ORDER BY PO_NUMBER) AS PO_NUMBERS,
+                SUM(QUANTITY) AS TOTAL_SKU_QUANTITY, MAX(SHIP_TO_FACILITY) AS SHIP_TO_FACILITY
+            FROM ORACLE_ERP.SCM.SQ_CM_ASN_INBOUND WHERE PART_NUMBER IS NOT NULL
+            GROUP BY TRACKING_NUMBER, PART_NUMBER
+        ) asn_sku ON ff.HOUSE_BOL = asn_sku.TRACKING_NUMBER
+        WHERE (ff.BOOKING_DATE >= DATEADD(month, -3, CURRENT_DATE())
+            OR (ff.BOOKING_DATE IS NULL AND ff.CREATED_AT >= DATEADD(month, -3, CURRENT_DATE())))
+        ORDER BY ff.ESTIMATED_DELIVERY_DATE DESC NULLS LAST, ff.SHIPMENT_ID, asn_sku.SKU
+        LIMIT 50"""
+
+    # Wistron shipments
+    if any(p in q for p in ['wistron shipment', 'wistron report', 'malaysia shipment',
+                             'wistron inbound']):
+        return """SELECT ff.SHIPMENT_ID, ff.HOUSE_BOL, ff.INCO_TERM,
+            asn_sku.PO_NUMBERS, asn_sku.SKU, asn_sku.TOTAL_SKU_QUANTITY, asn_sku.SHIP_TO_FACILITY,
+            ff.FORWARDER, ff.TRANSPORTATION_METHOD AS "Mode", ff.SHIPPER_NAME,
+            ff.DESTINATION_COUNTRY,
+            COALESCE(asn_sku.SHIP_TO_FACILITY, ff.CONSIGNEE_NAME) AS "Destination",
+            DATE(ff.ESTIMATED_DELIVERY_DATE) AS "ESTIMATED_DELIVERY_DATE",
+            DATE(ff.ACTUAL_DELIVERY_DATE) AS "ACTUAL_DELIVERY_DATE",
+            ff.PIECES, ff.GROSS_WEIGHT
+        FROM ORACLE_ERP.SCM.SQ_FF_SHIPMENT_INFO ff
+        LEFT JOIN (
+            SELECT TRACKING_NUMBER, PART_NUMBER AS SKU,
+                LISTAGG(DISTINCT PO_NUMBER, ', ') WITHIN GROUP (ORDER BY PO_NUMBER) AS PO_NUMBERS,
+                SUM(QUANTITY) AS TOTAL_SKU_QUANTITY, MAX(SHIP_TO_FACILITY) AS SHIP_TO_FACILITY
+            FROM ORACLE_ERP.SCM.SQ_CM_ASN_INBOUND WHERE PART_NUMBER IS NOT NULL
+            GROUP BY TRACKING_NUMBER, PART_NUMBER
+        ) asn_sku ON ff.HOUSE_BOL = asn_sku.TRACKING_NUMBER
+        WHERE (ff.ACTUAL_DELIVERY_DATE IS NULL OR ff.ACTUAL_DELIVERY_DATE >= DATEADD(day, -14, CURRENT_DATE()))
+        AND ff.ORIGIN_COUNTRY = 'MY'
+        AND (ff.CONSIGNEE_NAME IS NULL OR ff.CONSIGNEE_NAME NOT ILIKE '%Proto%')
+        ORDER BY ff.ESTIMATED_DELIVERY_DATE DESC NULLS FIRST, ff.SHIPMENT_ID, asn_sku.SKU
+        LIMIT 50"""
+
+    # Proto shipments
+    if any(p in q for p in ['proto shipment', 'proto report', 'prototype shipment',
+                             'proto inbound']):
+        return """SELECT ff.SHIPMENT_ID, ff.HOUSE_BOL, ff.INCO_TERM,
+            asn_sku.PO_NUMBERS, asn_sku.SKU, asn_sku.TOTAL_SKU_QUANTITY, asn_sku.SHIP_TO_FACILITY,
+            ff.FORWARDER, ff.TRANSPORTATION_METHOD AS "Mode", ff.SHIPPER_NAME,
+            ff.ORIGIN_COUNTRY, ff.DESTINATION_COUNTRY,
+            COALESCE(asn_sku.SHIP_TO_FACILITY, ff.CONSIGNEE_NAME) AS "Destination",
+            DATE(ff.ESTIMATED_DELIVERY_DATE) AS "ESTIMATED_DELIVERY_DATE",
+            DATE(ff.ACTUAL_DELIVERY_DATE) AS "ACTUAL_DELIVERY_DATE",
+            ff.PIECES, ff.GROSS_WEIGHT
+        FROM ORACLE_ERP.SCM.SQ_FF_SHIPMENT_INFO ff
+        LEFT JOIN (
+            SELECT TRACKING_NUMBER, PART_NUMBER AS SKU,
+                LISTAGG(DISTINCT PO_NUMBER, ', ') WITHIN GROUP (ORDER BY PO_NUMBER) AS PO_NUMBERS,
+                SUM(QUANTITY) AS TOTAL_SKU_QUANTITY, MAX(SHIP_TO_FACILITY) AS SHIP_TO_FACILITY
+            FROM ORACLE_ERP.SCM.SQ_CM_ASN_INBOUND WHERE PART_NUMBER IS NOT NULL
+            GROUP BY TRACKING_NUMBER, PART_NUMBER
+        ) asn_sku ON ff.HOUSE_BOL = asn_sku.TRACKING_NUMBER
+        WHERE (ff.ACTUAL_DELIVERY_DATE IS NULL OR ff.ACTUAL_DELIVERY_DATE >= DATEADD(day, -14, CURRENT_DATE()))
+        AND ff.CONSIGNEE_NAME ILIKE '%Proto%'
+        ORDER BY ff.ESTIMATED_DELIVERY_DATE DESC NULLS FIRST, ff.SHIPMENT_ID, asn_sku.SKU
+        LIMIT 50"""
+
+    return None
+
+
 def generate_sql_llm(question: str) -> Optional[str]:
     """Use Databricks-hosted LLM to generate SQL for a question."""
     try:
@@ -1229,7 +1314,12 @@ def answer_process_question(question: str, channel_config: Dict) -> Optional[str
 
 def answer_general_question(question: str, channel_config: Dict) -> Optional[str]:
     """Answer a general data question using LLM-generated SQL + LLM-formatted response."""
-    sql = generate_sql_llm(question)
+    # Check canned queries first (proven SQL for common report requests)
+    sql = _check_canned_query(question)
+    if sql:
+        print(f"  [CANNED] Matched canned query for: {question[:60]}")
+    else:
+        sql = generate_sql_llm(question)
     if not sql:
         return None
 
