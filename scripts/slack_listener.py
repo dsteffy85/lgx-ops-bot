@@ -1351,7 +1351,25 @@ def answer_general_question(question: str, channel_config: Dict) -> Optional[str
             return f"*{' | '.join(cols)}*\n" + "\n".join(lines)
 
     except Exception as e:
-        print(f"  [!] Query failed: {e}")
+        error_msg = str(e)
+        print(f"  [!] Query failed: {error_msg}")
+
+        # Auto-fix common SQL errors and retry once
+        if 'not a valid order by expression' in error_msg.lower() or 'order by' in error_msg.lower():
+            # Remove ORDER BY clause and retry
+            import re as _re
+            fixed_sql = _re.sub(r'\s+ORDER\s+BY\s+[^)]+?(?=\s+LIMIT|\s*$)', '', sql, flags=_re.IGNORECASE)
+            if fixed_sql != sql:
+                print(f"  [RETRY] Removed ORDER BY, retrying...")
+                try:
+                    cols, rows = query_sf(fixed_sql)
+                    print(f"  [RESULT] {len(rows)} rows (after fix)")
+                    if rows:
+                        formatted = _format_answer_llm(question, cols, rows)
+                        return formatted if formatted else f"Found {len(rows)} results."
+                except Exception as e2:
+                    print(f"  [!] Retry also failed: {e2}")
+
         return None
 
 
