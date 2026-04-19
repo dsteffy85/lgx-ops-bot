@@ -1186,7 +1186,22 @@ def _format_answer_llm(question: str, cols: List[str], rows: List[tuple]) -> Opt
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
             json={
                 'messages': [
-                    {'role': 'system', 'content': 'Format Snowflake query results as a concise Slack message. Rules:\n- Start with the key number in bold (e.g., *4,049 units*)\n- Add a one-sentence summary answering the question\n- Add 3-5 bullet points with relevant breakdowns from the data\n- Use Slack formatting: *bold*, bullet points with •\n- Format numbers with commas\n- Format dates as "Apr 6, 2025"\n- Keep it under 10 lines total\n- Do NOT include any header or bot name — just the answer content'},
+                    {'role': 'system', 'content': (
+                        'Format Snowflake query results as a concise Slack message. Rules:\n'
+                        '- Use Slack formatting: *bold*, bullet points with •\n'
+                        '- Format numbers with commas, currency with $ prefix\n'
+                        '- Format dates as "Apr 6, 2025"\n'
+                        '- Keep it under 15 lines total\n'
+                        '- Do NOT include any header or bot name — just the answer content\n'
+                        '- Do NOT sum or total prices/costs unless explicitly asked for a total\n\n'
+                        'FORMAT BY QUESTION TYPE:\n'
+                        '- PRICING questions (price, cost, sell price, sales price): List each product with its price. '
+                        'Format as a clean price list sorted high to low. Do NOT sum prices into a total.\n'
+                        '- COUNT/VOLUME questions (how many, units, shipped, delivered): Start with the key number in bold, '
+                        'then add breakdowns.\n'
+                        '- STATUS questions (order, tracking): Show status details with dates and tracking.\n'
+                        '- LIST questions (show me, what products): Clean bullet list of items.\n'
+                    )},
                     {'role': 'user', 'content': f'Question: {question}\n\nColumns: {", ".join(cols)}\nRows ({total_rows} total):\n{data_str}'}
                 ],
                 'max_tokens': 500
