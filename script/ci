@@ -1,0 +1,5 @@
+#!/bin/bash
+set -e
+echo "LGX-OPS-BOT CI — smoke test"
+python3 -c "from bot import config; print('bot.config OK')"
+echo "CI passed"

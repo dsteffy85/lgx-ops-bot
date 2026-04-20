@@ -5,7 +5,10 @@
 # Image: 186216918747.dkr.ecr.us-west-2.amazonaws.com/deployable/lgx-ops-bot
 # =============================================================================
 
-partitioner: "build_only"
+test_command: script/ci
+
+targets:
+  - type: docker-build
 
 build_artifacts:
   lgx-ops-bot:
