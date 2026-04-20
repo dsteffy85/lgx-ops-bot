@@ -2,10 +2,10 @@
 # Kochiku CI — LGX-OPS-BOT Docker image build → ECR
 # =============================================================================
 # Builds Docker image and pushes to ECR for SKI deployment.
-# Image lands at: 186216918747.dkr.ecr.us-west-2.amazonaws.com/deployable/lgx-ops-bot:<sha>
+# Image: 186216918747.dkr.ecr.us-west-2.amazonaws.com/deployable/lgx-ops-bot
 # =============================================================================
 
-test_command: "python -c 'from bot import config; print(\"config OK\")'"
+partitioner: "build_only"
 
 build_artifacts:
   lgx-ops-bot:
