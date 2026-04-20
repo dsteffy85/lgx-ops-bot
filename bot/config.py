@@ -7,6 +7,7 @@ Locally: Falls back to env vars, then hardcoded local paths.
 
 import os
 import json
+import glob
 import logging
 from pathlib import Path
 
@@ -15,8 +16,11 @@ logger = logging.getLogger(__name__)
 # Keywhiz mount path (SKI)
 SECRETS_DIR = Path("/config/secrets")
 
-# Local credential file (Mac development)
-LOCAL_KEY_FILE = Path.home() / "Desktop" / "LGX_OPS_BOT_private_keys_20260408_191019.json"
+# Local credential paths (Mac development)
+_LOCAL_KEY_PATTERNS = [
+    str(Path.home() / "Desktop" / "Automation" / "lgx-ops-bot" / "credentials" / "LGX_OPS_BOT_private_keys_*.json"),
+    str(Path.home() / "Desktop" / "LGX_OPS_BOT_private_keys_*.json"),
+]
 
 
 def _read_secret(keywhiz_name: str, env_var: str = "", default: str = "") -> str:
@@ -42,20 +46,31 @@ def _read_secret(keywhiz_name: str, env_var: str = "", default: str = "") -> str
 
 
 def _read_snowflake_key() -> str:
-    """Read Snowflake private key from Keywhiz, env, or local JSON file."""
+    """Read Snowflake private key from Keywhiz, env, or local JSON file.
+
+    The Keywhiz secret should contain the raw PEM private key.
+    The local JSON file contains {"square": {"private_key": "-----BEGIN..."}}.
+    """
+    # 1. Keywhiz / env var (raw PEM)
     key = _read_secret("lgx-ops-bot-snowflake-key", "SNOWFLAKE_PRIVATE_KEY")
     if key:
         return key
-    # Local fallback: read from JSON key file
-    if LOCAL_KEY_FILE.exists():
-        try:
-            data = json.loads(LOCAL_KEY_FILE.read_text())
-            key = data.get("private_key", "")
-            if key:
-                logger.info("Loaded Snowflake key from local file: %s", LOCAL_KEY_FILE)
-                return key
-        except Exception as e:
-            logger.warning("Failed to read local key file: %s", e)
+
+    # 2. Local fallback: read from JSON key file
+    for pattern in _LOCAL_KEY_PATTERNS:
+        key_files = glob.glob(pattern)
+        if key_files:
+            try:
+                data = json.loads(Path(key_files[0]).read_text())
+                # Handle both {"private_key": ...} and {"square": {"private_key": ...}}
+                key = data.get("private_key", "")
+                if not key and "square" in data:
+                    key = data["square"].get("private_key", "")
+                if key:
+                    logger.info("Loaded Snowflake key from local file: %s", key_files[0])
+                    return key
+            except Exception as e:
+                logger.warning("Failed to read local key file %s: %s", key_files[0], e)
     return ""
 
 
@@ -68,6 +83,23 @@ IS_SKI = SECRETS_DIR.exists() and any(SECRETS_DIR.iterdir()) if SECRETS_DIR.exis
 SLACK_BOT_TOKEN: str = _read_secret(
     "lgx-ops-bot-slack-token", "SLACK_BOT_TOKEN"
 )
+
+# Also try .env.local for local development
+if not SLACK_BOT_TOKEN:
+    _env_path = Path(__file__).resolve().parent.parent / ".env.local"
+    if _env_path.exists():
+        try:
+            for line in _env_path.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    if k.strip() == "SLACK_BOT_TOKEN":
+                        SLACK_BOT_TOKEN = v.strip()
+                        logger.info("Loaded SLACK_BOT_TOKEN from .env.local")
+                        break
+        except Exception as e:
+            logger.warning("Failed to read .env.local: %s", e)
+
 BOT_USER_ID: str = "U0ASVFR7NMB"
 BOT_SIGNATURE: str = "LGX-OPS-BOT"
 OSCAR_ID: str = "U02DXNZF8SF"
@@ -98,6 +130,7 @@ DATABRICKS_REFRESH_TOKEN: str = _read_secret(
 # Channel config
 # ---------------------------------------------------------------------------
 HARDWAREDELIVERYHELP_ID: str = "C2L95G8TF"
+RETAIL_OPS_HELP_ID: str = "C0AT9NHTR4H"
 CHANNEL_OVERRIDES: dict = {
     HARDWAREDELIVERYHELP_ID: {"oscar_cc": True, "disclaimer": True},
 }
