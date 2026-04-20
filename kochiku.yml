@@ -14,4 +14,4 @@ build_artifacts:
   lgx-ops-bot:
     ecr_container: Dockerfile
     distributions:
-      - el7
+      - el8
