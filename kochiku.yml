@@ -1,26 +1,13 @@
 # =============================================================================
-# Kochiku / Buildkite CI — LGX-OPS-BOT Docker image build
+# Kochiku CI — LGX-OPS-BOT Docker image build → ECR
 # =============================================================================
-version: 2
+# Builds Docker image and pushes to ECR for SKI deployment.
+# Image lands at: 186216918747.dkr.ecr.us-west-2.amazonaws.com/deployable/lgx-ops-bot:<sha>
+# =============================================================================
 
-build:
-  type: docker
-  docker:
-    image_name: lgx-ops-bot
-    dockerfile: Dockerfile
-    context: .
-    build_args: {}
+build_artifacts:
+  lgx-ops-bot:
+    ecr_container: Dockerfile
 
-  # Run basic smoke test after build
-  post_build:
-    - docker run --rm lgx-ops-bot python -c "from bot import config; print('config OK')"
-
-# Push to internal registry on main branch
-publish:
-  branches:
-    - main
-  registry: docker.sqprod.co
-  repository: sq-logistics/lgx-ops-bot
-  tag_with_git_sha: true
-  additional_tags:
-    - latest
+distributions:
+  - el7
