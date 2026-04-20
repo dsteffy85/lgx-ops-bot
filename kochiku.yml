@@ -5,9 +5,10 @@
 # Image lands at: 186216918747.dkr.ecr.us-west-2.amazonaws.com/deployable/lgx-ops-bot:<sha>
 # =============================================================================
 
+test_command: "python -c 'from bot import config; print(\"config OK\")'"
+
 build_artifacts:
   lgx-ops-bot:
     ecr_container: Dockerfile
-
-distributions:
-  - el7
+    distributions:
+      - el7
