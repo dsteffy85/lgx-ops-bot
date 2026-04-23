@@ -137,6 +137,33 @@ CHANNEL_OVERRIDES: dict = {
 DEFAULT_CHANNEL_CONFIG: dict = {"oscar_cc": False, "disclaimer": False}
 
 # ---------------------------------------------------------------------------
+# Databricks proxy workaround (SKI PrivateLink DNS issue)
+# ---------------------------------------------------------------------------
+# On SKI, block-lakehouse-production.cloud.databricks.com resolves via
+# PrivateLink DNS to 10.172.x.x — unreachable from the staging VPC.
+# Route through oregon.cloud.databricks.com with workspace Host header.
+DATABRICKS_PROXY_WORKAROUND: bool = os.environ.get(
+    "DATABRICKS_PROXY_WORKAROUND", ""
+).lower() in ("1", "true", "yes")
+_DATABRICKS_WORKSPACE = "block-lakehouse-production.cloud.databricks.com"
+_DATABRICKS_PUBLIC = "oregon.cloud.databricks.com"
+
+
+def databricks_request(method: str, url: str, **kwargs):
+    """Make a Databricks API request, routing through public hostname on SKI."""
+    import requests as _req
+    if DATABRICKS_PROXY_WORKAROUND and _DATABRICKS_WORKSPACE in url:
+        url = url.replace(
+            f"https://{_DATABRICKS_WORKSPACE}",
+            f"https://{_DATABRICKS_PUBLIC}",
+        )
+        headers = kwargs.get("headers", {})
+        headers["Host"] = _DATABRICKS_WORKSPACE
+        kwargs["headers"] = headers
+    return getattr(_req, method)(url, **kwargs)
+
+
+# ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
 POLL_INTERVAL: int = int(os.environ.get("POLL_INTERVAL", "10"))

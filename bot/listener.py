@@ -99,9 +99,8 @@ def _make_databricks_token_getter():
         # Try refreshing with refresh token
         refresh_token = config.DATABRICKS_REFRESH_TOKEN
         if refresh_token:
-            import requests
             try:
-                resp = requests.post(
+                resp = config.databricks_request('post',
                     f'{config.DATABRICKS_HOST}/oidc/v1/token',
                     data={
                         'grant_type': 'refresh_token',

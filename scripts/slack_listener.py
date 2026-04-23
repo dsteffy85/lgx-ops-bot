@@ -24,33 +24,28 @@ from typing import Optional, Dict, Any, List, Tuple
 # ============================================================================
 # DATABRICKS PROXY WORKAROUND (SKI only)
 # ============================================================================
-# On SKI, block-lakehouse-production.cloud.databricks.com resolves via
-# PrivateLink DNS to 10.172.x.x — unreachable from the staging VPC.
-# Workaround: route through the public hostname (oregon.cloud.databricks.com)
-# with the workspace Host header so Databricks routes to the correct workspace.
-# CloudProxy CAN reach the public hostname. Verified end-to-end: OAuth + LLM.
-_DATABRICKS_WORKSPACE = 'block-lakehouse-production.cloud.databricks.com'
-_DATABRICKS_PUBLIC = 'oregon.cloud.databricks.com'
-_USE_DATABRICKS_WORKAROUND = os.environ.get(
-    'DATABRICKS_PROXY_WORKAROUND', ''
-).lower() in ('1', 'true', 'yes')
+# Workaround is implemented in bot.config.databricks_request().
+# When running standalone (not via bot.main), define a local fallback.
+try:
+    from bot.config import databricks_request as _databricks_request
+except ImportError:
+    # Standalone mode — define locally
+    _DATABRICKS_WORKSPACE = 'block-lakehouse-production.cloud.databricks.com'
+    _DATABRICKS_PUBLIC = 'oregon.cloud.databricks.com'
+    _USE_DATABRICKS_WORKAROUND = os.environ.get(
+        'DATABRICKS_PROXY_WORKAROUND', ''
+    ).lower() in ('1', 'true', 'yes')
 
-
-def _databricks_request(method: str, url: str, **kwargs) -> requests.Response:
-    """Make a Databricks API request, routing through public hostname on SKI.
-
-    When DATABRICKS_PROXY_WORKAROUND is enabled, rewrites the URL to use the
-    public regional hostname and injects the workspace Host header.
-    """
-    if _USE_DATABRICKS_WORKAROUND and _DATABRICKS_WORKSPACE in url:
-        url = url.replace(
-            f'https://{_DATABRICKS_WORKSPACE}',
-            f'https://{_DATABRICKS_PUBLIC}',
-        )
-        headers = kwargs.get('headers', {})
-        headers['Host'] = _DATABRICKS_WORKSPACE
-        kwargs['headers'] = headers
-    return getattr(requests, method)(url, **kwargs)
+    def _databricks_request(method: str, url: str, **kwargs) -> requests.Response:
+        if _USE_DATABRICKS_WORKAROUND and _DATABRICKS_WORKSPACE in url:
+            url = url.replace(
+                f'https://{_DATABRICKS_WORKSPACE}',
+                f'https://{_DATABRICKS_PUBLIC}',
+            )
+            headers = kwargs.get('headers', {})
+            headers['Host'] = _DATABRICKS_WORKSPACE
+            kwargs['headers'] = headers
+        return getattr(requests, method)(url, **kwargs)
 
 
 # ============================================================================
