@@ -23,7 +23,18 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    import os
     logger.info("LGX-OPS-BOT starting up")
+
+    # Debug: log proxy and secret env vars
+    proxy_vars = {k: v for k, v in os.environ.items() if 'PROXY' in k.upper() or 'proxy' in k}
+    logger.info("Proxy env vars: %s", proxy_vars if proxy_vars else "NONE SET")
+    secret_dir = "/config/secrets"
+    if os.path.isdir(secret_dir):
+        secrets_found = os.listdir(secret_dir)
+        logger.info("Secrets in %s: %s", secret_dir, secrets_found)
+    else:
+        logger.info("Secrets dir %s does NOT exist", secret_dir)
 
     # Health / readiness probes (background daemon thread)
     start_health_server(port=8080)
