@@ -11,12 +11,12 @@ Usage:
 Runs as a persistent background process. Ctrl+C to stop.
 """
 import json
-# subprocess removed — no longer needed (was used for sq agent-tools CLI calls)
 import time
 import re
 import sys
 import glob
 import os
+import requests
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Tuple
@@ -81,7 +81,6 @@ def discover_channels() -> Dict[str, Dict]:
     channels the bot is already a member of — much lighter than conversations.list.
     """
     global _discovered_channels, _last_channel_refresh
-    import requests as _requests
 
     now = time.time()
     if _discovered_channels and (now - _last_channel_refresh) < CHANNEL_REFRESH_INTERVAL:
@@ -94,7 +93,7 @@ def discover_channels() -> Dict[str, Dict]:
             params = {'types': 'public_channel,private_channel', 'limit': '100', 'exclude_archived': 'true'}
             if cursor:
                 params['cursor'] = cursor
-            resp = _requests.get(
+            resp = requests.get(
                 'https://slack.com/api/users.conversations',
                 headers={'Authorization': f'Bearer {LGX_BOT_TOKEN}'},
                 params=params,
@@ -139,7 +138,7 @@ def discover_channels() -> Dict[str, Dict]:
                 im_params = {'types': 'im', 'limit': '100'}
                 if im_cursor:
                     im_params['cursor'] = im_cursor
-                im_resp = _requests.get(
+                im_resp = requests.get(
                     'https://slack.com/api/users.conversations',
                     headers={'Authorization': f'Bearer {LGX_BOT_TOKEN}'},
                     params=im_params,
@@ -390,10 +389,12 @@ def read_channel_api(channel_id: str, count: int = 15) -> List[Dict]:
 
     Returns a list of Slack message dicts (newest first), each with at least:
       ts, text, user, subtype, reply_count
+
+    # TODO: Add cursor pagination for count > 100 (Slack max per page).
+    # Current limit of 15 is well under the threshold.
     """
-    import requests as _requests
     try:
-        resp = _requests.get(
+        resp = requests.get(
             'https://slack.com/api/conversations.history',
             headers={'Authorization': f'Bearer {LGX_BOT_TOKEN}'},
             params={'channel': channel_id, 'limit': str(count)},
@@ -418,10 +419,12 @@ def read_thread_api(channel_id: str, thread_ts: str, limit: int = 20) -> List[Di
     """Read thread replies via Slack conversations.replies API.
 
     Returns a list of Slack message dicts (first element is the parent).
+
+    # TODO: Add cursor pagination for threads with > 100 replies.
+    # Current limit of 20 is well under the threshold.
     """
-    import requests as _requests
     try:
-        resp = _requests.get(
+        resp = requests.get(
             'https://slack.com/api/conversations.replies',
             headers={'Authorization': f'Bearer {LGX_BOT_TOKEN}'},
             params={'channel': channel_id, 'ts': thread_ts, 'limit': str(limit)},
@@ -458,9 +461,8 @@ def post_thread(channel_id: str, thread_ts: str, text: str) -> str:
     if not LGX_BOT_TOKEN:
         print(f"  [!] SLACK_BOT_TOKEN not set — refusing to post (would appear as dsteffy)")
         return ''
-    import requests as _requests
     try:
-        resp = _requests.post(
+        resp = requests.post(
             'https://slack.com/api/chat.postMessage',
             headers={'Authorization': f'Bearer {LGX_BOT_TOKEN}', 'Content-Type': 'application/json'},
             json={
@@ -487,9 +489,8 @@ def post_message(channel_id: str, text: str) -> str:
     if not LGX_BOT_TOKEN:
         print(f"  [!] SLACK_BOT_TOKEN not set — refusing to post")
         return ''
-    import requests as _requests
     try:
-        resp = _requests.post(
+        resp = requests.post(
             'https://slack.com/api/chat.postMessage',
             headers={'Authorization': f'Bearer {LGX_BOT_TOKEN}', 'Content-Type': 'application/json'},
             json={
@@ -751,7 +752,6 @@ def _generate_playbook_response(order_number: str, order_data: str,
                                  region: str = 'US') -> Optional[str]:
     """Use the playbook + LLM to generate an enriched triage response."""
     try:
-        import requests as _requests
 
         host = os.environ.get('DATABRICKS_HOST', 'https://block-lakehouse-production.cloud.databricks.com')
         token = _get_databricks_token()
@@ -799,7 +799,7 @@ def _generate_playbook_response(order_number: str, order_data: str,
 
         user_msg = f"Ticket text from Slack:\n{ticket_text}\n\nOrder data from Snowflake:\n{order_data}"
 
-        resp = _requests.post(
+        resp = requests.post(
             f'{host}/serving-endpoints/goose-claude-4-5-haiku/invocations',
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
             json={
@@ -943,7 +943,6 @@ def parse_eu_ticket(text: str) -> Dict[str, str]:
 
 def _get_databricks_token() -> Optional[str]:
     """Get a valid Databricks access token, refreshing if expired."""
-    import requests as _requests
 
     host = os.environ.get('DATABRICKS_HOST', 'https://block-lakehouse-production.cloud.databricks.com')
     token_files = glob.glob(os.path.expanduser('~/.config/goose/databricks/oauth/*.json'))
@@ -974,7 +973,7 @@ def _get_databricks_token() -> Optional[str]:
             print("  [!] No refresh token available")
             return None
         try:
-            resp = _requests.post(
+            resp = requests.post(
                 f'{host}/oidc/v1/token',
                 data={
                     'grant_type': 'refresh_token',
@@ -1095,14 +1094,13 @@ def _check_canned_query(question: str) -> Optional[str]:
 def generate_sql_llm(question: str) -> Optional[str]:
     """Use Databricks-hosted LLM to generate SQL for a question."""
     try:
-        import requests as _requests
 
         host = os.environ.get('DATABRICKS_HOST', 'https://block-lakehouse-production.cloud.databricks.com')
         token = _get_databricks_token()
         if not token:
             return None
 
-        resp = _requests.post(
+        resp = requests.post(
             f'{host}/serving-endpoints/goose-claude-4-5-haiku/invocations',
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
             json={
@@ -1190,7 +1188,6 @@ def _parse_sku(question: str) -> Optional[str]:
 def _format_answer_llm(question: str, cols: List[str], rows: List[tuple]) -> Optional[str]:
     """Use LLM to format query results into a natural Slack response."""
     try:
-        import requests as _requests
 
         host = os.environ.get('DATABRICKS_HOST', 'https://block-lakehouse-production.cloud.databricks.com')
         token = _get_databricks_token()
@@ -1209,7 +1206,7 @@ def _format_answer_llm(question: str, cols: List[str], rows: List[tuple]) -> Opt
         data_str = "\n".join(data_lines)
         total_rows = len(rows)
 
-        resp = _requests.post(
+        resp = requests.post(
             f'{host}/serving-endpoints/goose-claude-4-5-haiku/invocations',
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
             json={
@@ -1308,7 +1305,6 @@ def answer_process_question(question: str, channel_config: Dict) -> Optional[str
         return None
     
     try:
-        import requests as _requests
 
         host = os.environ.get('DATABRICKS_HOST', 'https://block-lakehouse-production.cloud.databricks.com')
         token = _get_databricks_token()
@@ -1318,7 +1314,7 @@ def answer_process_question(question: str, channel_config: Dict) -> Optional[str
         # Truncate KB to ~40K chars to stay within context limits
         kb_context = LOGISTICS_KB[:40000]
 
-        resp = _requests.post(
+        resp = requests.post(
             f'{host}/serving-endpoints/goose-claude-4-5-haiku/invocations',
             headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
             json={
@@ -1665,9 +1661,8 @@ processed_mentions: set = set()
 
 def _get_thread_replies_api(channel_id: str, thread_ts: str, limit: int = 20) -> List[Dict]:
     """Get thread replies via Slack API directly (more structured than sq agent-tools)."""
-    import requests as _requests
     try:
-        resp = _requests.get(
+        resp = requests.get(
             'https://slack.com/api/conversations.replies',
             headers={'Authorization': f'Bearer {LGX_BOT_TOKEN}'},
             params={'channel': channel_id, 'ts': thread_ts, 'limit': str(limit)},
@@ -1687,11 +1682,10 @@ def check_thread_mentions(channel_id: str, name: str, config: Dict):
     Scans recent channel messages that have threads, then checks if any
     thread reply mentions the bot and hasn't been answered yet.
     """
-    import requests as _requests
 
     # Get recent channel messages that have threads
     try:
-        resp = _requests.get(
+        resp = requests.get(
             'https://slack.com/api/conversations.history',
             headers={'Authorization': f'Bearer {LGX_BOT_TOKEN}'},
             params={'channel': channel_id, 'limit': '15'},
