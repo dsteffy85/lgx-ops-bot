@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 LGX-OPS-BOT Slack Listener — polls channels every 10 seconds for new questions,
-queries Snowflake, and posts answers via sq agent-tools slack.
+queries Snowflake, and posts answers via direct Slack API calls.
 
 Usage:
     python3 slack_listener.py                    # Watch all configured channels
@@ -11,7 +11,7 @@ Usage:
 Runs as a persistent background process. Ctrl+C to stop.
 """
 import json
-import subprocess
+# subprocess removed — no longer needed (was used for sq agent-tools CLI calls)
 import time
 import re
 import sys
@@ -383,42 +383,70 @@ def query_sf(sql: str) -> Tuple[List[str], List[tuple]]:
 
 
 # ============================================================================
-# SLACK HELPERS (via sq agent-tools)
+# SLACK HELPERS (direct Slack API — no sq agent-tools dependency)
 # ============================================================================
-def slack_cmd(args: str) -> str:
-    """Run an sq agent-tools slack command and return stdout."""
-    cmd = f"sq agent-tools slack {args}"
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
-    return result.stdout.strip()
+def read_channel_api(channel_id: str, count: int = 15) -> List[Dict]:
+    """Read recent messages from a channel via Slack conversations.history API.
+
+    Returns a list of Slack message dicts (newest first), each with at least:
+      ts, text, user, subtype, reply_count
+    """
+    import requests as _requests
+    try:
+        resp = _requests.get(
+            'https://slack.com/api/conversations.history',
+            headers={'Authorization': f'Bearer {LGX_BOT_TOKEN}'},
+            params={'channel': channel_id, 'limit': str(count)},
+            timeout=15,
+        )
+        data = resp.json()
+        if data.get('ok'):
+            return data.get('messages', [])
+        error = data.get('error', 'unknown')
+        if error == 'ratelimited':
+            retry_after = int(resp.headers.get('Retry-After', '30'))
+            print(f"  [CHANNELS] Rate limited on history, waiting {retry_after}s...")
+            time.sleep(retry_after)
+        else:
+            print(f"  [CHANNELS] conversations.history error: {error}")
+    except Exception as e:
+        print(f"  [!] Error reading channel {channel_id}: {e}")
+    return []
 
 
-def _unwrap_slack_result(raw: str) -> str:
-    """Unwrap JSON envelope from sq agent-tools slack output."""
-    if raw.startswith('{'):
-        try:
-            data = json.loads(raw)
-            return data.get('result', raw)
-        except json.JSONDecodeError:
-            pass
-    return raw
+def read_thread_api(channel_id: str, thread_ts: str, limit: int = 20) -> List[Dict]:
+    """Read thread replies via Slack conversations.replies API.
+
+    Returns a list of Slack message dicts (first element is the parent).
+    """
+    import requests as _requests
+    try:
+        resp = _requests.get(
+            'https://slack.com/api/conversations.replies',
+            headers={'Authorization': f'Bearer {LGX_BOT_TOKEN}'},
+            params={'channel': channel_id, 'ts': thread_ts, 'limit': str(limit)},
+            timeout=15,
+        )
+        data = resp.json()
+        if data.get('ok'):
+            return data.get('messages', [])
+        print(f"  [!] conversations.replies error: {data.get('error', 'unknown')}")
+    except Exception as e:
+        print(f"  [!] Error reading thread {thread_ts}: {e}")
+    return []
 
 
-def read_channel(channel_id: str, count: int = 15) -> str:
-    """Read recent messages from a channel."""
-    raw = slack_cmd(
-        f'get-channel-messages --channels \'[{{"channel_id_or_dm_id":"{channel_id}"}}]\' '
-        f'--messages-to-retrieve {count} --user-timezone America/Los_Angeles'
-    )
-    return _unwrap_slack_result(raw)
-
-
-def read_thread(channel_id: str, thread_ts: str) -> str:
-    """Read a thread's replies."""
-    raw = slack_cmd(
-        f'get-channel-messages --channels \'[{{"channel_id_or_dm_id":"{channel_id}","thread_ts":"{thread_ts}"}}]\' '
-        f'--messages-to-retrieve 20 --user-timezone America/Los_Angeles'
-    )
-    return _unwrap_slack_result(raw)
+def thread_has_bot_reply(channel_id: str, thread_ts: str) -> bool:
+    """Check if a thread already has a reply from this bot."""
+    replies = read_thread_api(channel_id, thread_ts)
+    for reply in replies:
+        # Check by bot user ID
+        if reply.get('user') == BOT_USER_ID:
+            return True
+        # Check by signature text in message body
+        if BOT_SIGNATURE in reply.get('text', ''):
+            return True
+    return False
 
 
 def post_thread(channel_id: str, thread_ts: str, text: str) -> str:
@@ -1391,37 +1419,21 @@ def answer_general_question(question: str, channel_config: Dict) -> Optional[str
 # ============================================================================
 # MESSAGE PARSER
 # ============================================================================
-def parse_messages(raw: str) -> List[Dict]:
-    """Parse sq agent-tools slack output into message dicts."""
-    messages = []
-    current = None
-    skip_prefixes = ('reactions:', 'files:', '  [', '## Tool', 'messages_',
-                     'contains_', 'min_', 'max_', 'total_', 'has_more')
-    for line in raw.split('\n'):
-        ts_match = re.search(r'\(ts: ([\d.]+)\)', line)
-        if ts_match and '###' in line:
-            if current:
-                messages.append(current)
-            current = {"ts": ts_match.group(1), "text": "", "user": "", "subtype": None, "reply_count": 0}
-        elif current:
-            if line.startswith('user: @'):
-                user_match = re.search(r'user: @(\w+)', line)
-                if user_match:
-                    current["user"] = user_match.group(1)
-            elif line.startswith('subtype:'):
-                current["subtype"] = line.split(':', 1)[1].strip()
-            elif line.startswith('reply_count:'):
-                current["reply_count"] = int(line.split(':', 1)[1].strip())
-            elif line.startswith('thread_ts:'):
-                pass  # skip
-            elif not line.startswith(skip_prefixes) and line.strip():
-                # Stop capturing text at tool summary markers
-                if 'Showing only recent' in line or 'messages_requested' in line:
-                    break
-                current["text"] += line.strip() + " "
-    if current:
-        messages.append(current)
-    return messages
+def normalize_api_messages(api_messages: List[Dict]) -> List[Dict]:
+    """Normalize Slack API message dicts into the format process_channel expects.
+
+    Each returned dict has: ts, text, user, subtype, reply_count
+    """
+    results = []
+    for msg in api_messages:
+        results.append({
+            "ts": msg.get("ts", "0"),
+            "text": msg.get("text", ""),
+            "user": msg.get("user", ""),
+            "subtype": msg.get("subtype"),
+            "reply_count": msg.get("reply_count", 0),
+        })
+    return results
 
 
 def find_order_number(text: str) -> Optional[str]:
@@ -1531,11 +1543,11 @@ def _check_casual_message(text: str) -> Optional[str]:
 
 def process_channel(channel_id: str, name: str, config: Dict):
     """Check a channel for new questions and answer them."""
-    raw = read_channel(channel_id, 15)
-    if not raw:
+    api_msgs = read_channel_api(channel_id, 15)
+    if not api_msgs:
         return
 
-    messages = parse_messages(raw)
+    messages = normalize_api_messages(api_msgs)
     answered = 0
     is_dm = config.get('is_dm', False)
     dm_user = config.get('dm_user', '')
@@ -1591,8 +1603,7 @@ def process_channel(channel_id: str, name: str, config: Dict):
 
         # Check thread for existing LGX-OPS-BOT reply (channels only)
         if not is_dm and msg["reply_count"] > 0:
-            thread_raw = read_thread(channel_id, msg["ts"])
-            if BOT_SIGNATURE in thread_raw:
+            if thread_has_bot_reply(channel_id, msg["ts"]):
                 processed_threads.add(msg["ts"])
                 continue
 
