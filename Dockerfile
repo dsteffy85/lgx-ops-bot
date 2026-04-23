@@ -48,4 +48,6 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
-ENTRYPOINT ["python", "-m", "bot.main"]
+# -u = unbuffered stdout/stderr so print() appears immediately in kubectl logs
+ENV PYTHONUNBUFFERED=1
+ENTRYPOINT ["python", "-u", "-m", "bot.main"]
