@@ -24,8 +24,12 @@ _LOCAL_KEY_PATTERNS = [
 
 
 def _read_secret(keywhiz_name: str, env_var: str = "", default: str = "") -> str:
-    """Read a secret from Keywhiz mount, then env var, then default."""
-    # 1. Keywhiz (SKI)
+    """Read a secret: env var first (allows CCD overrides), then Keywhiz, then default."""
+    # 1. Environment variable (highest priority — allows CCD env.yaml overrides)
+    if env_var and os.environ.get(env_var):
+        logger.info("Loaded secret from env: %s", env_var)
+        return os.environ[env_var]
+    # 2. Keywhiz (SKI)
     secret_path = SECRETS_DIR / keywhiz_name
     if secret_path.exists():
         try:
@@ -35,10 +39,6 @@ def _read_secret(keywhiz_name: str, env_var: str = "", default: str = "") -> str
                 return val
         except Exception as e:
             logger.warning("Failed to read Keywhiz secret %s: %s", keywhiz_name, e)
-    # 2. Environment variable
-    if env_var and os.environ.get(env_var):
-        logger.info("Loaded secret from env: %s", env_var)
-        return os.environ[env_var]
     # 3. Default
     if default:
         logger.info("Using default for: %s", keywhiz_name)
